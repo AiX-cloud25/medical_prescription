@@ -64,6 +64,29 @@
        three sibling projects. Structure and colors stay identical. ═══ */
     const APP_TITLE = "Offline Prescription Extractor";
 
+    /*
+     * BASE — auto-detects the proxy path prefix on Jarvis Labs / RunPod.
+     * When Jarvis proxies port 8002 it serves the app at a URL like:
+     *   https://<id>-8002.proxy.runpod.net/          (no path prefix)
+     * or sometimes:
+     *   https://<host>/proxy/8002/                   (path prefix)
+     *
+     * We strip any trailing slash so every API call becomes BASE + "/api/..."
+     * which works correctly in both local (BASE="") and proxied environments.
+     *
+     * FastAPI also sets a root_path via --proxy-headers so its own links
+     * are consistent, but the frontend needs to know the prefix too.
+     */
+    const BASE = (() => {
+      // If the page was served from a sub-path, use that as prefix.
+      // e.g. pathname = "/proxy/8002/" → prefix = "/proxy/8002"
+      // e.g. pathname = "/"           → prefix = ""
+      const p = window.location.pathname.replace(/\/(index\.html)?$/, "");
+      return p || "";
+    })();
+
+    const api = (path) => BASE + path;  // usage: fetch(api("/api/health"))
+
     const STEPS = [
       { n: 1, label: "Upload", icon: "upload_file" },
       { n: 2, label: "Review", icon: "plagiarism" },
@@ -110,7 +133,7 @@
       const [state, setState] = useState({ status: "loading", entries: [], error: "" });
 
       useEffect(() => {
-        fetch("/api/dictionary")
+        fetch(api("/api/dictionary"))
           .then(async (r) => {
             const body = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
@@ -511,7 +534,7 @@
       async function saveRawEdit() {
         setSave({ status: "saving", msg: "Saving…" });
         try {
-          const res = await fetch("/api/raw-feedback", {
+          const res = await fetch(api("/api/raw-feedback"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -543,7 +566,7 @@
       async function revertRaw() {
         setSave({ status: "saving", msg: "Reverting…" });
         try {
-          const res = await fetch(`/api/raw-feedback/${result.doc_hash}`, { method: "DELETE" });
+          const res = await fetch(api(`/api/raw-feedback/${result.doc_hash}`), { method: "DELETE" });
           const body = await res.json().catch(() => ({}));
           if (!res.ok && res.status !== 404) throw new Error(body.detail || `HTTP ${res.status}`);
           // 404 = nothing stored anymore; still restore the model text locally.
@@ -952,7 +975,7 @@
       const busyRef = useRef(false); // one extraction in flight at a time
 
       useEffect(() => {
-        fetch("/api/health").then((r) => r.json()).then((d) => setEngine(d.engine || "")).catch(() => {});
+        fetch(api("/api/health")).then((r) => r.json()).then((d) => setEngine(d.engine || "")).catch(() => {});
       }, []);
 
       const pump = () => {
@@ -966,7 +989,7 @@
             // Step 1 — POST the file, get a job_id back immediately (no timeout risk)
             const fd = new FormData();
             fd.append("file", item.file, item.file.name);
-            const res = await fetch("/api/extract", { method: "POST", body: fd });
+            const res = await fetch(api("/api/extract"), { method: "POST", body: fd });
             const startData = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(startData.detail || startData.error || `Server error (${res.status})`);
 
@@ -978,7 +1001,7 @@
             const MAX_POLLS = 900; // 4s × 900 = 60 min max
             for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
               await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-              const pollRes = await fetch(`/api/jobs/${jobId}`);
+              const pollRes = await fetch(api(`/api/jobs/${jobId}`));
               const data = await pollRes.json().catch(() => ({}));
               if (!pollRes.ok) throw new Error(data.detail || `Poll error (${pollRes.status})`);
               if (data.status === "done") {

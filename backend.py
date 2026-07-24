@@ -429,15 +429,18 @@ if __name__ == "__main__":
     import uvicorn
     import os
     # Bind to 0.0.0.0 so Jarvis Labs proxy can reach the server.
-    # Use HOST env var to override (default 0.0.0.0 for cloud, can set to
-    # 127.0.0.1 for local-only).
+    # Use APP_HOST env var to override (127.0.0.1 for local, 0.0.0.0 for cloud).
     host = os.getenv("APP_HOST", "0.0.0.0")
+    # ROOT_PATH: set this if Jarvis proxies under a sub-path e.g. /proxy/8002
+    # Leave empty for direct port access or standard reverse proxy setups.
+    root_path = os.getenv("ROOT_PATH", "")
     uvicorn.run(
         app,
         host=host,
         port=PORT,
-        # Increase keep-alive so Jarvis proxy long-polling doesn't reset.
+        root_path=root_path,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
         timeout_keep_alive=300,
-        # Allow large file uploads (PDF etc.)
         h11_max_incomplete_event_size=10 * 1024 * 1024,
     )
