@@ -427,4 +427,17 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=PORT)
+    import os
+    # Bind to 0.0.0.0 so Jarvis Labs proxy can reach the server.
+    # Use HOST env var to override (default 0.0.0.0 for cloud, can set to
+    # 127.0.0.1 for local-only).
+    host = os.getenv("APP_HOST", "0.0.0.0")
+    uvicorn.run(
+        app,
+        host=host,
+        port=PORT,
+        # Increase keep-alive so Jarvis proxy long-polling doesn't reset.
+        timeout_keep_alive=300,
+        # Allow large file uploads (PDF etc.)
+        h11_max_incomplete_event_size=10 * 1024 * 1024,
+    )

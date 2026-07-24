@@ -1,0 +1,22 @@
+# Python and web files — use LF everywhere
+*.py    text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.env*  text eol=lf
+
+# Shell scripts must always use LF (Linux requirement)
+*.sh    text eol=lf
+
+# Windows scripts use CRLF
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+
+# Binary files — no line ending conversion
+*.jpg   binary
+*.jpeg  binary
+*.png   binary
+*.webp  binary
+*.pdf   binary
+*.pyc   binary
