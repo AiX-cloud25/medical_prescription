@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Offline Prescription Extractor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: "#0d9488",
+            "primary-deep": "#0f766e",
+            accent: "#10b981",
+            mint: "#f0fdf9",
+            "mint-2": "#ccfbf1",
+            ink: "#134e4a",
+            "ink-soft": "#3f6d68",
+            line: "#99f6e4",
+            paper: "#ffffff",
+            danger: "#dc2626",
+          },
+          fontFamily: { sans: ["Poppins", "sans-serif"] },
+          boxShadow: {
+            card: "0 4px 24px -6px rgba(13, 148, 136, 0.18)",
+            glow: "0 0 0 4px rgba(16, 185, 129, 0.18)",
+          },
+          keyframes: {
+            fadeIn: { "0%": { opacity: 0, transform: "translateY(8px)" }, "100%": { opacity: 1, transform: "translateY(0)" } },
+            shimmer: { "0%": { backgroundPosition: "-400px 0" }, "100%": { backgroundPosition: "400px 0" } },
+          },
+          animation: { fadeIn: "fadeIn .35s ease-out", shimmer: "shimmer 1.6s linear infinite" },
+        },
+      },
+    };
+  </script>
+  <style>
+    body { font-family: "Poppins", sans-serif; }
+    .material-symbols-outlined { font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #f0fdf9; }
+    ::-webkit-scrollbar-thumb { background: #5eead4; border-radius: 8px; }
+    .shimmer-bar {
+      background: linear-gradient(90deg, #e6f7f3 25%, #d2f0e8 50%, #e6f7f3 75%);
+      background-size: 800px 100%;
+    }
+  </style>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-mint min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    /* ═══ Per-project constants — ONLY these (and <title>) differ between the
+       three sibling projects. Structure and colors stay identical. ═══ */
+    const APP_TITLE = "Offline Prescription Extractor";
+
+    const STEPS = [
+      { n: 1, label: "Upload", icon: "upload_file" },
+      { n: 2, label: "Review", icon: "plagiarism" },
+      { n: 3, label: "Structured Data", icon: "table_chart" },
+    ];
+
+    /* ── Header ──────────────────────────────────────────────── */
+    function Header({ engine, onDictionary }) {
+      return (
+        <header className="bg-gradient-to-r from-primary to-accent shadow-card">
+          <div className="max-w-6xl mx-auto px-6 py-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-full bg-white/20 backdrop-blur flex items-center justify-center">
+                <span className="material-symbols-outlined text-white text-3xl">prescriptions</span>
+              </div>
+              <div>
+                <h1 className="text-white text-2xl font-bold tracking-tight">{APP_TITLE}</h1>
+                <p className="text-white/85 text-sm font-light">Doctor prescription → raw text → structured data</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+              <button
+                onClick={onDictionary}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-white/15 border border-white/30 rounded-full px-3.5 py-1.5 hover:bg-white/25 transition"
+                title="Learned spelling dictionary — every correction grouped by the verified word"
+              >
+                <span className="material-symbols-outlined text-base">menu_book</span>
+                Dictionary
+              </button>
+              {engine && (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-white/15 border border-white/30 rounded-full px-3.5 py-1.5">
+                  <span className="material-symbols-outlined text-base">memory</span>
+                  {engine}
+                </span>
+              )}
+            </div>
+          </div>
+        </header>
+      );
+    }
+
+    /* ── Learned spelling dictionary panel ───────────────────── */
+    function DictionaryPanel({ onClose }) {
+      const [state, setState] = useState({ status: "loading", entries: [], error: "" });
+
+      useEffect(() => {
+        fetch("/api/dictionary")
+          .then(async (r) => {
+            const body = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+            setState({ status: "done", entries: body.entries || [], error: "" });
+          })
+          .catch((e) => setState({ status: "error", entries: [], error: String(e.message || e) }));
+      }, []);
+
+      return (
+        <div className="max-w-5xl mx-auto mb-8 animate-fadeIn">
+          <div className="bg-paper rounded-2xl shadow-card overflow-hidden">
+            <div className="px-6 py-4 border-b border-line/60 flex items-center gap-3">
+              <span className="material-symbols-outlined text-primary">menu_book</span>
+              <h3 className="text-ink font-semibold">Learned Spelling Dictionary</h3>
+              <span className="text-xs text-ink-soft">misspelling variants grouped by the human-verified word</span>
+              <button onClick={onClose} className="ml-auto text-ink-soft hover:text-ink transition" title="Close">
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            {state.status === "loading" ? (
+              <p className="text-ink-soft text-sm italic px-6 py-5">Loading…</p>
+            ) : state.status === "error" ? (
+              <p className="text-red-600 text-sm px-6 py-5">{state.error}</p>
+            ) : state.entries.length === 0 ? (
+              <p className="text-ink-soft text-sm italic px-6 py-5">
+                No learned corrections yet — fix a word in the Raw Text tab and save, and it will appear here.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-mint-2/70 text-ink">
+                      {["Raw (model wrote)", "Corrected (verified)", "Confirmations", "Status"].map((h) => (
+                        <th key={h} className="text-left font-semibold px-4 py-2 whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {state.entries.map((e, i) => (
+                      <tr key={i} className="border-t border-line/40 align-top">
+                        <td className="px-4 py-2 text-ink">
+                          {e.variants.map((v) => `${v.raw} (${v.times}×)`).join(", ")}
+                        </td>
+                        <td className="px-4 py-2 font-semibold text-ink">{e.corrected}</td>
+                        <td className="px-4 py-2 text-ink">{e.total}</td>
+                        <td className="px-4 py-2">
+                          {e.automatic ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-0.5">
+                              <span className="material-symbols-outlined text-sm">bolt</span> automatic
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-2.5 py-0.5">
+                              <span className="material-symbols-outlined text-sm">school</span> teaching the model
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-[11px] text-ink-soft italic px-6 py-3 border-t border-line/40">
+              Variants pool their confirmations: once a corrected word reaches 3 total, all its
+              variants are fixed automatically in code; below that they guide the AI as prompt examples.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    /* ── Step indicator ──────────────────────────────────────── */
+    function Stepper({ step }) {
+      return (
+        <div className="flex items-center justify-center gap-0 py-8">
+          {STEPS.map((s, i) => (
+            <React.Fragment key={s.n}>
+              {i > 0 && (
+                <div className={"h-0.5 w-14 sm:w-24 " + (step >= s.n ? "bg-primary" : "bg-line")} />
+              )}
+              <div className="flex flex-col items-center gap-1.5 px-2">
+                <div className={
+                  "w-11 h-11 rounded-full flex items-center justify-center border-2 transition-all " +
+                  (step > s.n
+                    ? "bg-primary border-primary text-white"
+                    : step === s.n
+                      ? "bg-white border-primary text-primary shadow-glow"
+                      : "bg-white border-line text-ink-soft/50")
+                }>
+                  <span className="material-symbols-outlined text-xl">{step > s.n ? "check" : s.icon}</span>
+                </div>
+                <span className={"text-xs font-semibold " + (step >= s.n ? "text-ink" : "text-ink-soft/50")}>
+                  {s.label}
+                </span>
+              </div>
+            </React.Fragment>
+          ))}
+        </div>
+      );
+    }
+
+    /* ── Status chip ─────────────────────────────────────────── */
+    function StatusChip({ status }) {
+      const map = {
+        queued:     { cls: "bg-amber-100 text-amber-700 border-amber-200", label: "Queued" },
+        extracting: { cls: "bg-sky-100 text-sky-700 border-sky-200", label: "Extracting…" },
+        processed:  { cls: "bg-mint-2 text-primary-deep border-line", label: "Processed" },
+        error:      { cls: "bg-red-50 text-danger border-red-200", label: "Error" },
+      };
+      const s = map[status] || map.queued;
+      return (
+        <span className={"inline-flex items-center text-[11px] font-semibold rounded-full border px-2.5 py-0.5 whitespace-nowrap " + s.cls}>
+          {s.label}
+        </span>
+      );
+    }
+
+    /* ── Page 1 — Upload (multi-file, auto-queued) ───────────── */
+    function UploadPage({ docs, onFilesAdded, onView }) {
+      const [dragOver, setDragOver] = useState(false);
+      const [error, setError] = useState("");
+      const inputRef = useRef(null);
+
+      const pick = (list) => {
+        const files = Array.from(list || []);
+        if (!files.length) return;
+        const ok = files.filter((f) => /\.(jpe?g|png|webp|pdf)$/i.test(f.name));
+        if (!ok.length) { setError("Unsupported file. Upload JPG, PNG or WEBP images, or PDFs."); return; }
+        setError(ok.length < files.length ? "Some files were skipped — only JPG, PNG, WEBP and PDF are supported." : "");
+        onFilesAdded(ok);
+      };
+
+      const processedCount = docs.filter((d) => d.status === "processed").length;
+      const busyCount = docs.filter((d) => d.status === "queued" || d.status === "extracting").length;
+
+      return (
+        <div className="animate-fadeIn max-w-3xl mx-auto">
+          <div
+            className={
+              "bg-paper rounded-3xl shadow-card border-2 border-dashed p-10 text-center transition-all cursor-pointer " +
+              (dragOver ? "border-accent bg-mint-2/60 shadow-glow" : "border-line hover:border-accent/70")
+            }
+            onClick={() => inputRef.current && inputRef.current.click()}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => { e.preventDefault(); setDragOver(false); pick(e.dataTransfer.files); }}
+          >
+            <input
+              ref={inputRef} type="file" className="hidden" multiple
+              accept=".jpg,.jpeg,.png,.webp,.pdf,image/*,application/pdf"
+              onChange={(e) => { pick(e.target.files); e.target.value = ""; }}
+            />
+            <div className="w-20 h-20 mx-auto rounded-full bg-mint-2 flex items-center justify-center mb-5">
+              <span className="material-symbols-outlined text-primary text-5xl">cloud_upload</span>
+            </div>
+            <h2 className="text-ink text-xl font-semibold mb-1">Upload prescriptions</h2>
+            <p className="text-ink-soft text-sm mb-6">Drag &amp; drop images or PDFs here, or click to browse — extraction starts automatically, one document at a time</p>
+            <button
+              type="button"
+              className="rounded-full bg-gradient-to-r from-primary to-accent text-white font-semibold text-sm px-8 py-3 shadow-card hover:opacity-90 transition"
+              onClick={(e) => { e.stopPropagation(); inputRef.current && inputRef.current.click(); }}
+            >
+              Browse Files
+            </button>
+            <p className="text-ink-soft/70 text-xs mt-5">Supported: JPG · PNG · WEBP · PDF — multiple files allowed</p>
+          </div>
+
+          {docs.length > 0 && (
+            <div className="animate-fadeIn mt-6 bg-paper rounded-2xl shadow-card overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-line/60 flex items-center gap-2">
+                <span className="material-symbols-outlined text-primary">folder_open</span>
+                <h3 className="text-ink font-semibold text-sm">Documents</h3>
+                <span className="text-xs text-ink-soft ml-1">
+                  {processedCount} processed{busyCount ? ` · ${busyCount} in progress` : ""}
+                </span>
+                <button
+                  onClick={onView}
+                  className="ml-auto rounded-full bg-gradient-to-r from-primary to-accent text-white font-semibold text-xs px-5 py-2 shadow-card hover:opacity-90 transition flex items-center gap-1.5"
+                >
+                  View Extractions <span className="material-symbols-outlined text-base">arrow_forward</span>
+                </button>
+              </div>
+              <ul className="divide-y divide-line/40">
+                {docs.map((d) => (
+                  <li key={d.id} className="px-5 py-3 flex items-center gap-4">
+                    {/\.pdf$/i.test(d.file.name) ? (
+                      <div className="w-12 h-12 rounded-lg bg-mint-2 flex items-center justify-center shrink-0">
+                        <span className="material-symbols-outlined text-primary text-2xl">picture_as_pdf</span>
+                      </div>
+                    ) : (
+                      <img src={URL.createObjectURL(d.file)} alt="preview"
+                           className="w-12 h-12 rounded-lg object-cover border border-line shrink-0" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-ink font-medium text-sm truncate">{d.file.name}</p>
+                      <p className="text-ink-soft text-xs">{(d.file.size / 1024).toFixed(1)} KB</p>
+                    </div>
+                    {d.status === "extracting" && (
+                      <span className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin inline-block" />
+                    )}
+                    <StatusChip status={d.status} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {error && (
+            <div className="animate-fadeIn mt-6 bg-red-50 border border-red-200 text-danger rounded-2xl p-4 text-sm flex items-start gap-2">
+              <span className="material-symbols-outlined text-xl shrink-0">error</span>
+              <span className="whitespace-pre-wrap break-words">{error}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ── Layout reconstruction + structured-data helpers ─────── */
+    function buildLayoutDoc(fragment) {
+      return (
+        "<!DOCTYPE html><html><head>" +
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:\">" +
+        "<style>" +
+        "body { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; color: #1f2937; background: #fff; padding: 16px; margin: 0; }" +
+        "table { border-collapse: collapse; margin: 6px 0; }" +
+        "td, th { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 12px; }" +
+        ".hw { font-family: 'Segoe Print', 'Bradley Hand', cursive; color: #1d4ed8; }" +
+        ".stamp { display: inline-block; border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; transform: rotate(-2deg); margin: 2px; }" +
+        ".unc { background: #fef9c3; }" +
+        "img.cut { max-width: 100%; height: auto; border-radius: 4px; }" +
+        "img.cut:not([src]) { border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; min-height: 18px; }" +
+        "</style></head><body>" + fragment + "</body></html>"
+      );
+    }
+
+    function LayoutFrame({ html }) {
+      return (
+        <iframe
+          sandbox=""
+          srcDoc={buildLayoutDoc(html)}
+          title="reconstructed layout"
+          className="w-full h-[480px] bg-white rounded-lg border border-line"
+        />
+      );
+    }
+
+    function fieldByKey(fields, key) {
+      const f = (fields || []).find((x) => x.key === key);
+      return f && f.value && f.value !== "(blank)" ? f.value : "";
+    }
+
+    function csvCell(v) {
+      return '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+    }
+
+    function exportCsv(doc) {
+      const r = doc.result || {};
+      const lines = [];
+      lines.push(["Field", "Value", "Explanation", "Business Meaning"].map(csvCell).join(","));
+      (r.fields || []).forEach((f) =>
+        lines.push([f.name || f.key, f.value, f.explanation, f.business_meaning].map(csvCell).join(","))
+      );
+      lines.push("");
+      lines.push(["Medicine", "Dosage", "Frequency", "Duration", "Instructions"].map(csvCell).join(","));
+      (r.medicines || []).forEach((m) =>
+        lines.push([m.medicine, m.dosage, m.frequency, m.duration, m.instructions].map(csvCell).join(","))
+      );
+      const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (doc.file.name.replace(/\.[^.]+$/, "") || "document") + "_structured.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function FieldsTable({ fields }) {
+      return (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-mint-2/70 text-ink">
+                {["Field", "Value", "Explanation", "Business Meaning"].map((h) => (
+                  <th key={h} className="text-left font-semibold px-3 py-2 whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {fields.map((f, i) => (
+                <tr key={i} className="border-t border-line/40 align-top">
+                  <td className="px-3 py-2 font-semibold text-ink whitespace-nowrap">{f.name || f.key}</td>
+                  <td className="px-3 py-2 text-ink">{f.value || "—"}</td>
+                  <td className="px-3 py-2 text-ink-soft">{f.explanation || ""}</td>
+                  <td className="px-3 py-2 text-ink-soft">{f.business_meaning || ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    function MedsTable({ medicines }) {
+      return (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-mint-2/70 text-ink">
+                {["Medicine", "Dosage", "Frequency", "Duration", "Instructions"].map((h) => (
+                  <th key={h} className="text-left font-semibold px-3 py-2 whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {medicines.map((m, i) => (
+                <tr key={i} className="border-t border-line/40 align-top">
+                  <td className="px-3 py-2 font-semibold text-ink">{m.medicine || "—"}</td>
+                  <td className="px-3 py-2 text-ink">{m.dosage || ""}</td>
+                  <td className="px-3 py-2 text-ink">{m.frequency || ""}</td>
+                  <td className="px-3 py-2 text-ink">{m.duration || ""}</td>
+                  <td className="px-3 py-2 text-ink-soft">{m.instructions || ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    }
+
+    function DocChips({ docs, selectedId, onSelect }) {
+      return (
+        <div className="flex flex-wrap gap-2 mb-6">
+          {docs.map((d) => (
+            <button
+              key={d.id}
+              onClick={() => onSelect(d.id)}
+              className={
+                "flex items-center gap-2 rounded-full border px-4 py-2 text-sm transition " +
+                (d.id === selectedId
+                  ? "bg-primary text-white border-primary shadow-card"
+                  : "bg-paper text-ink border-line hover:border-primary")
+              }
+            >
+              <span className="material-symbols-outlined text-lg">
+                {/\.pdf$/i.test(d.file.name) ? "picture_as_pdf" : "image"}
+              </span>
+              <span className="font-medium truncate max-w-[140px]">{d.file.name}</span>
+              <StatusChip status={d.status} />
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    /* ── Page 2 — Review (original / layout / structured) ────── */
+    function PanelBusy({ status, error }) {
+      if (status === "error") {
+        return <p className="text-danger text-sm whitespace-pre-wrap break-words p-5">{error || "Extraction failed."}</p>;
+      }
+      return (
+        <div className="flex items-center justify-center h-full min-h-[300px] gap-3 text-ink-soft text-sm">
+          <span className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin inline-block" />
+          {status === "extracting" ? "Extracting…" : "Queued — waiting for its turn"}
+        </div>
+      );
+    }
+
+    function ExtractionCard({ doc, onRawTextSaved, onRawTextReverted }) {
+      const { file, result, status } = doc;
+      const [copied, setCopied] = useState(false);
+      const [tab, setTab] = useState("layout");
+      const [pageIdx, setPageIdx] = useState(0);
+      const [editing, setEditing] = useState(false);
+      const [draftText, setDraftText] = useState("");
+      const [save, setSave] = useState({ status: "idle", msg: "" });
+      const url = React.useMemo(() => URL.createObjectURL(file), [file]);
+      const isPdf = /\.pdf$/i.test(file.name);
+      const meta = (result && result.meta) || {};
+      const pages = (result && result.pages) || [];
+      const page = pages[Math.min(pageIdx, Math.max(pages.length - 1, 0))] || null;
+
+      const copy = async () => {
+        try {
+          await navigator.clipboard.writeText((result && result.raw_text) || "");
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        } catch (e) { /* clipboard unavailable */ }
+      };
+
+      const done = status === "processed";
+
+      function startEdit() {
+        setDraftText((result && result.raw_text) || "");
+        setSave({ status: "idle", msg: "" });
+        setEditing(true);
+      }
+
+      async function saveRawEdit() {
+        setSave({ status: "saving", msg: "Saving…" });
+        try {
+          const res = await fetch("/api/raw-feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              doc_hash: result.doc_hash,
+              filename: file.name,
+              original_text: result.raw_text || "",
+              corrected_text: draftText,
+            }),
+          });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+          onRawTextSaved(doc.id, draftText, body.pairs || []);
+          setEditing(false);
+          setSave({ status: "saved", msg: "Correction saved — re-uploading this file will show the corrected text." });
+        } catch (e) {
+          setSave({ status: "error", msg: String(e.message || e) });
+        }
+      }
+
+      const draftDirty = draftText !== ((result && result.raw_text) || "") && draftText.trim() !== "";
+
+      // Original transcription rebuilt from the page texts (the model output
+      // of the last extraction) — fallback when the server has no stored one.
+      function originalFromPages() {
+        if (pages.length === 1) return pages[0].text || "";
+        return pages.map((p) => `--- Page ${p.page} ---\n${p.text}`).join("\n\n");
+      }
+
+      async function revertRaw() {
+        setSave({ status: "saving", msg: "Reverting…" });
+        try {
+          const res = await fetch(`/api/raw-feedback/${result.doc_hash}`, { method: "DELETE" });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok && res.status !== 404) throw new Error(body.detail || `HTTP ${res.status}`);
+          // 404 = nothing stored anymore; still restore the model text locally.
+          onRawTextReverted(doc.id, body.original_text || originalFromPages());
+          setSave({ status: "saved", msg: "Reverted — the correction was deleted and the original text restored." });
+        } catch (e) {
+          setSave({ status: "error", msg: String(e.message || e) });
+        }
+      }
+
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Panel 1: original uploaded document */}
+          <div className="bg-paper rounded-2xl shadow-card overflow-hidden flex flex-col">
+            <div className="px-5 py-3.5 border-b border-line/60 flex items-center gap-2">
+              <span className="material-symbols-outlined text-primary">image</span>
+              <h3 className="text-ink font-semibold text-sm">Original Document</h3>
+              <span className="ml-auto text-xs text-ink-soft truncate max-w-[45%]">{file.name}</span>
+            </div>
+            <div className="flex-1 bg-mint-2/40 flex items-center justify-center p-3 min-h-[420px]">
+              {isPdf ? (
+                <iframe src={url} title="prescription" className="w-full h-[520px] rounded-lg border border-line" />
+              ) : (
+                <img src={url} alt="prescription" className="max-h-[520px] max-w-full rounded-lg shadow-card object-contain" />
+              )}
+            </div>
+          </div>
+
+          {/* Panel 2: reconstructed layout / raw text */}
+          <div className="bg-paper rounded-2xl shadow-card overflow-hidden flex flex-col">
+            <div className="px-5 py-3.5 border-b border-line/60 flex items-center gap-2">
+              <span className="material-symbols-outlined text-primary">description</span>
+              <h3 className="text-ink font-semibold text-sm">Reconstructed Layout</h3>
+              {done && (
+                <div className="ml-auto flex items-center gap-1">
+                  {tab === "raw" && !editing && (
+                    <React.Fragment>
+                      <button
+                        onClick={startEdit}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:text-primary-deep transition rounded-full border border-line px-3 py-1"
+                        title="Correct the extracted text — the fix is remembered for this document"
+                      >
+                        <span className="material-symbols-outlined text-base">edit</span> Edit
+                      </button>
+                      <button
+                        onClick={copy}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:text-primary-deep transition rounded-full border border-line px-3 py-1"
+                      >
+                        <span className="material-symbols-outlined text-base">{copied ? "check" : "content_copy"}</span>
+                        {copied ? "Copied" : "Copy"}
+                      </button>
+                    </React.Fragment>
+                  )}
+                  <div className="flex rounded-full border border-line overflow-hidden text-xs font-medium">
+                    {[["layout", "Layout"], ["raw", "Raw Text"]].map(([k, label]) => (
+                      <button
+                        key={k}
+                        onClick={() => setTab(k)}
+                        className={"px-3 py-1 transition " + (tab === k ? "bg-primary text-white" : "text-primary hover:bg-mint-2")}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex-1 p-4 overflow-auto max-h-[560px]">
+              {!done ? (
+                <PanelBusy status={status} error={doc.error} />
+              ) : tab === "raw" ? (
+                editing ? (
+                  <div>
+                    <textarea
+                      value={draftText}
+                      onChange={(e) => { setDraftText(e.target.value); setSave({ status: "idle", msg: "" }); }}
+                      spellCheck={false}
+                      className="w-full h-[440px] bg-mint/40 border border-line rounded-lg p-3 text-[13px] leading-6 text-ink font-sans focus:outline-none focus:border-primary resize-none"
+                    />
+                    <div className="flex items-center justify-end gap-2 mt-2">
+                      {save.msg && (
+                        <span className={"text-xs font-medium mr-auto " + (save.status === "error" ? "text-red-600" : "text-ink-soft")}>
+                          {save.msg}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => setEditing(false)}
+                        className="rounded-full border border-line text-ink-soft text-xs font-medium px-4 py-1.5 hover:bg-mint-2 transition"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        disabled={!draftDirty || save.status === "saving"}
+                        onClick={saveRawEdit}
+                        className={
+                          "rounded-full bg-primary text-white text-xs font-semibold px-4 py-1.5 transition " +
+                          (draftDirty && save.status !== "saving" ? "hover:opacity-90" : "opacity-40 cursor-not-allowed")
+                        }
+                        title={draftDirty ? "Save the corrected text" : "Change the text first — only edits are saved"}
+                      >
+                        {save.status === "saving" ? "Saving…" : "Save Correction"}
+                      </button>
+                    </div>
+                  </div>
+                ) : result && result.raw_text ? (
+                  <div>
+                    {result.raw_text_corrected && (
+                      <div className="flex flex-wrap items-center gap-2 mb-2">
+                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
+                          <span className="material-symbols-outlined text-sm">verified</span> corrected version
+                        </span>
+                        <button
+                          disabled={save.status === "saving"}
+                          onClick={revertRaw}
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600 border border-red-200 rounded-full px-3 py-1 hover:bg-red-50 transition disabled:opacity-40"
+                          title="Delete this correction and restore the original extracted text"
+                        >
+                          <span className="material-symbols-outlined text-sm">undo</span>
+                          {save.status === "saving" ? "Reverting…" : "Revert to original"}
+                        </button>
+                      </div>
+                    )}
+                    {result.autocorrections && result.autocorrections.length > 0 && (
+                      <p className="text-[11px] text-sky-700 bg-sky-50 border border-sky-200 rounded-full inline-flex px-3 py-1 mb-2 font-medium">
+                        Dictionary auto-corrections: {result.autocorrections.map((a) => `${a.from} → ${a.to}`).join(", ")}
+                      </p>
+                    )}
+                    {result.medgemma_corrections && result.medgemma_corrections.length > 0 && (
+                      <p className="text-[11px] text-violet-700 bg-violet-50 border border-violet-200 rounded-full inline-flex px-3 py-1 mb-2 font-medium">
+                        MedGemma corrected {result.medgemma_corrections.length} medical word{result.medgemma_corrections.length === 1 ? "" : "s"} (marked with *): {result.medgemma_corrections.map((a) => `${a.from} → ${a.to}`).join(", ")}
+                      </p>
+                    )}
+                    {save.status === "saved" && (
+                      <p className="text-xs text-emerald-600 font-medium mb-2">{save.msg}</p>
+                    )}
+                    {save.status === "error" && (
+                      <p className="text-xs text-red-600 font-medium mb-2">{save.msg}</p>
+                    )}
+                    <pre className="whitespace-pre-wrap break-words text-[13px] leading-6 text-ink font-sans">{result.raw_text}</pre>
+                  </div>
+                ) : (
+                  <p className="text-ink-soft text-sm italic">No text could be extracted from this file.</p>
+                )
+              ) : (
+                <React.Fragment>
+                  {pages.length > 1 && (
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {pages.map((p, i) => (
+                        <button
+                          key={p.page}
+                          onClick={() => setPageIdx(i)}
+                          className={
+                            "rounded-full border px-3 py-1 text-xs font-medium transition " +
+                            (i === pageIdx ? "bg-primary text-white border-primary" : "border-line text-primary hover:bg-mint-2")
+                          }
+                        >
+                          Page {p.page}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {page && page.layout_html ? (
+                    <LayoutFrame html={page.layout_html} />
+                  ) : (
+                    <p className="text-ink-soft text-sm italic p-2">
+                      {(page && page.layout_error) || "No layout reconstruction available for this page."}
+                    </p>
+                  )}
+                </React.Fragment>
+              )}
+            </div>
+            {done && (
+              <div className="px-5 py-3 border-t border-line/60 flex flex-wrap gap-2">
+                {meta.engine && (
+                  <span className="text-[11px] font-medium text-primary-deep bg-mint-2 rounded-full px-3 py-1">
+                    {meta.engine}
+                  </span>
+                )}
+                <span className="text-[11px] font-medium text-primary-deep bg-mint-2 rounded-full px-3 py-1">
+                  {pages.length} page{pages.length === 1 ? "" : "s"}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function ReviewPage({ docs, onBack, onNext, onRawTextSaved, onRawTextReverted }) {
+      const [selectedId, setSelectedId] = useState(docs.length ? docs[docs.length - 1].id : null);
+
+      useEffect(() => {
+        if (!docs.some((d) => d.id === selectedId)) {
+          setSelectedId(docs.length ? docs[docs.length - 1].id : null);
+        }
+      }, [docs]);
+
+      const sel = docs.find((d) => d.id === selectedId) || null;
+
+      return (
+        <div className="animate-fadeIn max-w-6xl mx-auto">
+          <DocChips docs={docs} selectedId={selectedId} onSelect={setSelectedId} />
+
+          {sel && <ExtractionCard key={sel.id} doc={sel} onRawTextSaved={onRawTextSaved} onRawTextReverted={onRawTextReverted} />}
+
+          <div className="flex justify-between mt-8">
+            <button
+              onClick={onBack}
+              className="rounded-full border-2 border-primary text-primary font-semibold text-sm px-7 py-2.5 hover:bg-mint-2 transition flex items-center gap-1.5"
+            >
+              <span className="material-symbols-outlined text-lg">arrow_back</span> New Upload
+            </button>
+            <button
+              onClick={onNext}
+              className="rounded-full bg-gradient-to-r from-primary to-accent text-white font-semibold text-sm px-7 py-2.5 shadow-card hover:opacity-90 transition flex items-center gap-1.5"
+            >
+              View Structured Data <span className="material-symbols-outlined text-lg">arrow_forward</span>
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ── Page 3 — Structured table (placeholder) ─────────────── */
+    function Shimmer({ w }) {
+      return <div className={"h-3.5 rounded-full shimmer-bar animate-shimmer " + w} />;
+    }
+
+    function StructuredPage({ docs, onBack, onRestart }) {
+      const [selectedId, setSelectedId] = useState(docs.length ? docs[docs.length - 1].id : null);
+
+      useEffect(() => {
+        if (!docs.some((d) => d.id === selectedId)) {
+          setSelectedId(docs.length ? docs[docs.length - 1].id : null);
+        }
+      }, [docs]);
+
+      const sel = docs.find((d) => d.id === selectedId) || null;
+      const result = (sel && sel.result) || {};
+      const fields = result.fields || [];
+      const medicines = result.medicines || [];
+      const busy = sel && (sel.status === "queued" || sel.status === "extracting");
+      const done = sel && sel.status === "processed";
+
+      return (
+        <div className="animate-fadeIn max-w-5xl mx-auto">
+          <DocChips docs={docs} selectedId={selectedId} onSelect={setSelectedId} />
+
+          <div className="bg-paper rounded-2xl shadow-card overflow-hidden">
+            <div className="px-6 py-4 border-b border-line/60 flex flex-wrap items-center gap-3">
+              <span className="material-symbols-outlined text-primary">table_chart</span>
+              <h3 className="text-ink font-semibold">Structured Prescription Data</h3>
+              {sel && (
+                <span className="ml-auto text-xs text-ink-soft truncate max-w-[40%]">{sel.file.name}</span>
+              )}
+            </div>
+
+            {/* Header fields */}
+            <div className="grid sm:grid-cols-3 gap-4 px-6 py-5 border-b border-line/60">
+              {[["Patient Name", "patient_name"], ["Doctor Name", "doctor_name"], ["Prescription Date", "prescription_date"]].map(([label, key]) => (
+                <div key={key} className="bg-mint rounded-xl border border-line/60 px-4 py-3">
+                  <p className="text-[11px] font-semibold text-ink-soft uppercase tracking-wide mb-2">{label}</p>
+                  {busy ? (
+                    <Shimmer w="w-3/4" />
+                  ) : (
+                    <p className="text-ink text-sm font-medium">{fieldByKey(fields, key) || "—"}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Medicines */}
+            <div className="px-6 pt-4 pb-1">
+              <p className="text-[11px] font-semibold text-ink-soft uppercase tracking-wide">Medicines</p>
+            </div>
+            {busy ? (
+              <div className="px-6 pb-5"><Shimmer w="w-full" /></div>
+            ) : medicines.length > 0 ? (
+              <MedsTable medicines={medicines} />
+            ) : (
+              <p className="text-ink-soft text-sm italic px-6 pb-4">No medicines detected on this document.</p>
+            )}
+
+            {/* All extracted fields */}
+            <div className="px-6 pt-4 pb-1 border-t border-line/40">
+              <p className="text-[11px] font-semibold text-ink-soft uppercase tracking-wide">All Extracted Fields</p>
+            </div>
+            {busy ? (
+              <div className="px-6 pb-5"><Shimmer w="w-full" /></div>
+            ) : fields.length > 0 ? (
+              <FieldsTable fields={fields} />
+            ) : (
+              <p className="text-ink-soft text-sm italic px-6 pb-4">
+                {result.fields_error || (sel ? "No structured fields detected." : "Upload a document to see structured data.")}
+              </p>
+            )}
+
+            <div className="px-6 py-4 border-t border-line/60 flex items-center justify-between">
+              <p className="text-xs text-ink-soft italic">
+                Values are verbatim from the document; to correct mistakes, edit the Raw Text on the Review page.
+              </p>
+              <button
+                disabled={!done}
+                onClick={() => done && exportCsv(sel)}
+                className={
+                  "rounded-full bg-gradient-to-r from-primary to-accent text-white font-semibold text-sm px-6 py-2.5 flex items-center gap-1.5 transition " +
+                  (done ? "shadow-card hover:opacity-90" : "opacity-40 cursor-not-allowed")
+                }
+                title={done ? "Download structured data as CSV" : "Available once this document is processed"}
+              >
+                <span className="material-symbols-outlined text-lg">download</span> Export
+              </button>
+            </div>
+          </div>
+
+          <div className="flex justify-between mt-8">
+            <button
+              onClick={onBack}
+              className="rounded-full border-2 border-primary text-primary font-semibold text-sm px-7 py-2.5 hover:bg-mint-2 transition flex items-center gap-1.5"
+            >
+              <span className="material-symbols-outlined text-lg">arrow_back</span> Back to Review
+            </button>
+            <button
+              onClick={onRestart}
+              className="rounded-full border-2 border-primary text-primary font-semibold text-sm px-7 py-2.5 hover:bg-mint-2 transition flex items-center gap-1.5"
+            >
+              <span className="material-symbols-outlined text-lg">restart_alt</span> Start Over
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    /* ── App shell ───────────────────────────────────────────── */
+    function App() {
+      const [step, setStep] = useState(1);
+      const [docs, setDocs] = useState([]); // [{ id, file, status, result, error }]
+
+      const onRawTextSaved = (docId, newText, pairs) =>
+        setDocs((ds) => ds.map((d) => {
+          if (d.id !== docId) return d;
+          let pages = (d.result && d.result.pages) || [];
+          if (pairs && pairs.length) {
+            // Patch corrected words into the layout too, keeping the model's
+            // original so Revert can restore it. Anchor-first: replace the
+            // predicted value only right after its field label, so a
+            // corrected '(blank)' never touches other blank fields; global
+            // whole-word replace is the fallback for normal words only.
+            const escRx = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            pages = pages.map((p) => {
+              if (!p.layout_html) return p;
+              let html = p.layout_html;
+              pairs.forEach(([pred, corr, anchor]) => {
+                const predRx = new RegExp("(?<![A-Za-z0-9])" + escRx(pred) + "(?![A-Za-z0-9])");
+                let done = false;
+                const words = (anchor || "").match(/[A-Za-z0-9]+/g) || [];
+                const gap = "(?:<[^>]*>|[^A-Za-z0-9<])*";
+                // Anchor may start with stray words from the previous line —
+                // try progressively shorter suffixes until one matches.
+                for (let k = 0; k < words.length; k++) {
+                  const am = html.match(new RegExp(words.slice(k).map(escRx).join(gap), "i"));
+                  if (!am) continue;
+                  const start = am.index + am[0].length;
+                  const windowStr = html.slice(start, start + 300);
+                  // Human-verified value wins. Candidates: exact predicted
+                  // value, '(blank)', or a handwritten span — whichever sits
+                  // NEAREST to the label is this field's value.
+                  const cands = [];
+                  const pm = windowStr.match(predRx);
+                  if (pm) cands.push([pm.index, pm.index + pm[0].length]);
+                  if (pred !== "(blank)") {
+                    const bm = windowStr.match(/\(blank\)/);
+                    if (bm) cands.push([bm.index, bm.index + bm[0].length]);
+                  }
+                  const hw = windowStr.match(/(<span class="hw">)([^<]{1,20})(<\/span>)/);
+                  if (hw) cands.push([hw.index + hw[1].length, hw.index + hw[1].length + hw[2].length]);
+                  if (cands.length) {
+                    cands.sort((a, b) => a[0] - b[0]);
+                    const s = start + cands[0][0], e = start + cands[0][1];
+                    html = html.slice(0, s) + corr + html.slice(e);
+                    done = true;
+                  }
+                  break; // anchor matched — don't retry riskier shorter suffixes
+                }
+                if (!done && pred.indexOf("(blank)") < 0 && pred.indexOf("[illegible]") < 0) {
+                  html = html.replace(new RegExp(predRx.source, "g"), () => corr);
+                }
+              });
+              return { ...p, _orig_layout: p._orig_layout || p.layout_html, layout_html: html };
+            });
+          }
+          return { ...d, result: { ...d.result, pages, raw_text: newText, raw_text_corrected: true } };
+        }));
+
+      const onRawTextReverted = (docId, originalText) =>
+        setDocs((ds) => ds.map((d) => {
+          if (d.id !== docId) return d;
+          const pages = ((d.result && d.result.pages) || []).map((p) =>
+            p._orig_layout ? { ...p, layout_html: p._orig_layout, _orig_layout: undefined } : p
+          );
+          return { ...d, result: { ...d.result, pages, raw_text: originalText, raw_text_corrected: false } };
+        }));
+      const [engine, setEngine] = useState("");
+      const nextId = useRef(0);
+      const queueRef = useRef([]);   // docs waiting to be extracted
+      const busyRef = useRef(false); // one extraction in flight at a time
+
+      useEffect(() => {
+        fetch("/api/health").then((r) => r.json()).then((d) => setEngine(d.engine || "")).catch(() => {});
+      }, []);
+
+      const pump = () => {
+        if (busyRef.current) return;
+        const item = queueRef.current.shift();
+        if (!item) return;
+        busyRef.current = true;
+        setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "extracting" } : d)));
+        (async () => {
+          try {
+            const fd = new FormData();
+            fd.append("file", item.file, item.file.name);
+            const res = await fetch("/api/extract", { method: "POST", body: fd });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || data.error || `Server error (${res.status})`);
+            setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "processed", result: data } : d)));
+          } catch (e) {
+            setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "error", error: String(e.message || e) } : d)));
+          } finally {
+            busyRef.current = false;
+            if (queueRef.current.length > 0) {
+              pump();
+            } else {
+              // Queue drained — move to Review if the user is still on Upload.
+              setStep((s) => (s === 1 ? 2 : s));
+            }
+          }
+        })();
+      };
+
+      const addFiles = (files) => {
+        const items = files.map((f) => {
+          nextId.current += 1;
+          return { id: nextId.current, file: f, status: "queued", result: null, error: "" };
+        });
+        setDocs((ds) => [...ds, ...items]);
+        queueRef.current.push(...items);
+        pump();
+      };
+
+      const newUpload = () => setStep(1);
+      const clearAll = () => { queueRef.current = []; setDocs([]); setStep(1); };
+      const [showDictionary, setShowDictionary] = useState(false);
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          <Header engine={engine} onDictionary={() => setShowDictionary((v) => !v)} />
+          <main className="flex-1 max-w-6xl w-full mx-auto px-6 pb-14">
+            <Stepper step={step} />
+            {showDictionary && <DictionaryPanel onClose={() => setShowDictionary(false)} />}
+            {step === 1 && (
+              <UploadPage docs={docs} onFilesAdded={addFiles} onView={() => setStep(2)} />
+            )}
+            {step === 2 && docs.length > 0 && (
+              <ReviewPage docs={docs} onBack={newUpload} onNext={() => setStep(3)} onRawTextSaved={onRawTextSaved} onRawTextReverted={onRawTextReverted} />
+            )}
+            {step === 3 && (
+              <StructuredPage docs={docs} onBack={() => setStep(2)} onRestart={clearAll} />
+            )}
+          </main>
+          <footer className="text-center text-xs text-ink-soft/70 pb-6">
+            {APP_TITLE} · demo build
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
