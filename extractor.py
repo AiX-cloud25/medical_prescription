@@ -181,8 +181,12 @@ _LAYOUT_SYSTEM = (
     "no markdown fences. Your output must start with an HTML tag.\n"
     "- The host page provides base CSS. Use ONLY these class names instead "
     "of inventing styles:\n"
-    "  * class=\"hw\" — wrap ALL handwritten text in it (it renders in a "
-    "handwriting-style font).\n"
+    "  * class=\"hw\" — ONLY for text that is physically pen-written on the "
+    "form by a human hand (filled-in patient name, doctor's notes, handwritten "
+    "values). PRINTED or TYPED text — even if it is a symptom list, a "
+    "continuous sentence, a section heading, a footer, or a form label — "
+    "is NEVER hw. When in doubt: if it was there before the doctor picked "
+    "up a pen, it is NOT hw.\n"
     "  * class=\"cut\" — ONLY for actual drawings/diagrams/sketches/"
     "figures (e.g. an anatomical body diagram, a hand-drawn chart) emit an "
     "image tag so the host can cut the real picture out of the uploaded "
@@ -206,6 +210,28 @@ _LAYOUT_SYSTEM = (
     "other text. A margin date + note is a flex row (date in a narrow left "
     "cell, note beside it) or the date on its own line with the note below "
     "— never two elements occupying the same spot.\n\n"
+    "LAYOUT FIDELITY — THE MOST IMPORTANT RULE:\n"
+    "Look at the image carefully BEFORE generating any HTML. Your HTML must "
+    "mirror the VISUAL STRUCTURE of the image as closely as possible:\n"
+    "- If the image shows a HEADER/LETTERHEAD at the top, render it centered.\n"
+    "- If the image shows content in TWO SIDE-BY-SIDE COLUMNS, render two columns.\n"
+    "- If the image shows a SINGLE COLUMN of text, render a single column — "
+    "do NOT force it into a table.\n"
+    "- If the image shows a PRINTED SYMPTOM LIST (like 'Nausea, Indigestion, "
+    "Dysphagia, Dyspepsia, Haematemesis...'), render it as a single block of "
+    "plain text matching the image — NOT as a <table> and NOT as hw. A "
+    "continuous printed sentence or comma-separated list is just a <p> or "
+    "<div> with plain text.\n"
+    "- If the image shows a FORM WITH LABEL:VALUE ROWS, render as label:value "
+    "pairs in the same visual order as the image.\n"
+    "- If the image shows a TABLE (grid with visible borders/lines), render "
+    "as <table>.\n"
+    "- ANNOTATIONS: when a handwritten note or arrow points TO something "
+    "printed, describe it inline next to that element: e.g. "
+    "'<span class=\"hw\">[circled: option 1]</span>' or "
+    "'<span class=\"hw\">[arrow pointing to: Lymph nodes]</span>'. "
+    "NEVER just say '(handwritten)' with no content — always describe "
+    "what is written/drawn and what it points to.\n\n"
     "LAYOUT RULES:\n"
     "- Reproduce the page's own visual structure top to bottom: letterhead/"
     "title centered when centered on the page, sections in page order with "
@@ -568,20 +594,28 @@ _LOCAL_RULES = (
 # Same two rules as imperative output-order commands, appended to the USER
 # message — the last tokens before generation, which the 7B follows best.
 _LOCAL_USER_RULES = (
-    "\n\nBEFORE YOU WRITE, apply these five commands:\n"
+    "\n\nBEFORE YOU WRITE, apply these six commands:\n"
     "- FIRST LINES: your very first output (in both sections) must be the "
     "topmost PRINTED text — the institute letterhead and form title. Look "
     "at the top edge of the image now and transcribe it first.\n"
     "- PRINTED = PLAIN, HANDWRITTEN = hw. Every letter, word or line "
     "printed on the form (headings, labels, checklists, option lists, "
-    "footers) is plain text — NO hw class. Only actual pen-ink writing "
-    "(filled-in names, doctor notes, written values) gets the hw class.\n"
+    "footers, continuous symptom lists) is plain text — NO hw class. "
+    "Only actual pen-ink writing (filled-in names, doctor notes, written "
+    "values) gets the hw class. If it was printed before the doctor "
+    "touched the page, it is NOT hw.\n"
     "- NO [LEFT]/[RIGHT] MARKERS in the raw text output. Merge both columns "
     "into Notes / Orders sub-lines per dated entry.\n"
-    "- TABLE CHECK: for sections like COMPLAINTS AND DURATION / HISTORY OF "
-    "PRESENT ILLNESS / PAST HISTORY / FAMILY HISTORY — the label is plain "
-    "bold, the handwritten answer is hw. In the HTML use a <table> with two "
-    "columns: printed label (bold, no hw) | handwritten answer (hw).\n"
+    "- TABLE CHECK: ONLY use <table> when the image actually shows a grid "
+    "or two-column label:value form. A printed continuous sentence or a "
+    "comma-separated symptom list (e.g. 'Nausea, Indigestion, Dysphagia...') "
+    "is a plain <p> — NOT a table. Form sections like COMPLAINTS AND DURATION "
+    "/ HISTORY OF PRESENT ILLNESS / PAST HISTORY / FAMILY HISTORY with "
+    "printed label + handwritten answer are a <table> with two columns: "
+    "printed label (bold, no hw) | handwritten answer (hw).\n"
+    "- IMAGE MATCH: after writing each section of HTML, mentally compare it "
+    "to the corresponding area of the image. The structure, column count, "
+    "and element order must match what is visually in the image.\n"
     "- NO [illegible] EVER. Guess every word stroke by stroke. Uncertain "
     "words get (?). Every piece of text on the page must appear in your "
     "output — nothing skipped, nothing replaced with [illegible]."
@@ -728,6 +762,169 @@ def _unhw_letterhead(text: str, layout: str) -> str:
     return layout
 
 
+def _raw_text_to_html(raw_text: str) -> str:
+    """
+    Pure-Python guaranteed fallback: convert raw plain text to readable HTML.
+    Never raises. Handles letterhead, UPPERCASE headings, Label : value lines,
+    two-column Notes/Orders blocks, and plain indented content.
+    """
+    if not raw_text:
+        return '<div style="color:#888;font-style:italic">No content extracted.</div>'
+
+    import html as _html  # stdlib — always available
+
+    lines = raw_text.splitlines()
+    parts = [
+        '<div style="font-family:Georgia,serif;font-size:13px;'
+        'line-height:1.7;color:#1f2937;padding:4px">'
+    ]
+    in_letterhead = True
+    i = 0
+    while i < len(lines):
+        raw_line = lines[i]
+        s = raw_line.strip()
+        i += 1
+
+        if not s:
+            in_letterhead = False
+            parts.append('<div style="height:0.35em"></div>')
+            continue
+
+        escaped = _html.escape(s)
+
+        # Letterhead — first non-blank lines before first blank line
+        if in_letterhead:
+            parts.append(
+                f'<div style="text-align:center;font-weight:700;'
+                f'font-size:14px;margin-bottom:2px">{escaped}</div>'
+            )
+            continue
+
+        # ALL-CAPS section heading ending with colon (e.g. "EXAMINATION :")
+        if s == s.upper() and (s.endswith(":") or s.endswith(": ")) and len(s) < 80:
+            parts.append(
+                f'<div style="font-weight:700;margin-top:0.6em;'
+                f'border-bottom:1px solid #d1d5db;padding-bottom:2px">{escaped}</div>'
+            )
+            continue
+
+        # Notes : <value>  or  Orders : <value>  (two-column progress note)
+        if s.startswith(("Notes :", "Orders :")):
+            label, _, val = s.partition(" : ")
+            e_label = _html.escape(label)
+            e_val = _html.escape(val) if val else ""
+            hw = f'<span style="font-family:\'Segoe Print\',cursive;color:#1d4ed8">{e_val}</span>' if e_val else ""
+            parts.append(
+                f'<div style="display:flex;gap:0.4em;margin-left:1em">'
+                f'<span style="min-width:5em;font-weight:600;color:#374151">{e_label} :</span>'
+                f'{hw}</div>'
+            )
+            continue
+
+        # Label : value
+        if " : " in s:
+            label, _, val = s.partition(" : ")
+            e_label = _html.escape(label)
+            e_val = _html.escape(val) if val else "(blank)"
+            # Handwritten values (anything after a colon that isn't "(blank)")
+            if val and val != "(blank)":
+                val_html = (
+                    f'<span style="font-family:\'Segoe Print\',cursive;'
+                    f'color:#1d4ed8">{e_val}</span>'
+                )
+            else:
+                val_html = f'<span style="color:#6b7280">{e_val}</span>'
+            parts.append(
+                f'<div style="display:flex;gap:0.5em;margin:1px 0">'
+                f'<span style="min-width:14em;font-weight:600">{e_label} :</span>'
+                f'{val_html}</div>'
+            )
+            continue
+
+        # Date line (starts with "Date :" pattern already handled above,
+        # but bare dates like "18/11/18" at start of line)
+        indent = len(raw_line) - len(raw_line.lstrip())
+        margin = f"margin-left:{min(indent, 8) * 0.5}em" if indent else ""
+        style = f' style="{margin}"' if margin else ""
+        parts.append(f'<div{style}>{escaped}</div>')
+
+    parts.append('</div>')
+    return "\n".join(parts)
+
+
+# Slim system prompt for the dedicated layout-only call — much shorter than
+# the full _LAYOUT_SYSTEM so the model has headroom to produce HTML output.
+_LAYOUT_SLIM_SYSTEM = (
+    "You produce an HTML layout fragment of a medical document page. "
+    "Output ONLY the HTML — no markdown fences, no explanation, start directly with an HTML tag.\n\n"
+    "RULES:\n"
+    "- class=\"hw\" = ONLY for actual pen-ink handwriting (filled values, doctor notes). "
+    "Printed form text (headings, labels, symptom lists, footers) is NEVER hw — plain text only.\n"
+    "- class=\"unc\" = uncertain words with (?) suffix.\n"
+    "- class=\"stamp\" = stamps, seals, signatures: '[STAMP: text]'.\n"
+    "- class=\"cut\" = ONLY real drawn diagrams: "
+    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[DIAGRAM: description]\">\n"
+    "- NO position:absolute, NO negative margins.\n"
+    "- Mirror the image structure: single-column page → single column HTML. "
+    "Two-column page → flex row. Printed symptom list → <p> not <table>. "
+    "Form with label+handwritten answer → <table> two columns.\n"
+    "- Letterhead centered at top. Bottom items (date, signature) last.\n"
+    "- Describe annotations: e.g. <span class=\"hw\">[circled: Early]</span> or "
+    "<span class=\"hw\">[arrow → Lymph nodes, Pallor +]</span>.\n"
+    "- Output compact HTML only."
+)
+
+
+def _generate_layout(b64_image: str, page_num: int, raw_text: str) -> tuple:
+    """
+    Dedicated layout-only call used when the combined call produced text
+    but missed the HTML section. Uses the already-extracted raw_text as
+    context so the layout can be consistent with it.
+    Returns (layout_html, error_str|None).
+    Falls back to a Python-generated HTML if the model keeps failing.
+    """
+    layout_user = (
+        f"Convert this already-transcribed page {page_num} into an HTML layout fragment. "
+        "Use the image to determine what is printed vs handwritten, and to match the "
+        "visual structure. hw = pen ink only. Printed text = no hw class.\n\n"
+        f"TRANSCRIBED TEXT:\n{raw_text[:3000]}\n\n"
+        "Output the HTML fragment now. Start with an HTML tag."
+    )
+    last_err = None
+    for attempt in range(3):
+        try:
+            raw, _reason = _ollama_chat(
+                _LAYOUT_SLIM_SYSTEM,
+                layout_user,
+                [b64_image],
+                6000,
+            )
+            if raw:
+                # Strip any prose the model put before the HTML
+                html_start = raw.find("<")
+                if html_start != -1:
+                    html = raw[html_start:]
+                    print(f"[INFO] Page {page_num}: layout-only call succeeded "
+                          f"(attempt {attempt + 1})")
+                    return _sanitize_html(html), None
+            print(f"[WARNING] Page {page_num} layout-only call returned no HTML, "
+                  f"attempt {attempt + 1}/3. Raw: {repr((raw or '')[:120])}")
+            if attempt < 2:
+                time.sleep(3)
+        except Exception as e:
+            last_err = e
+            print(f"[WARNING] Page {page_num} layout-only call error: {e}, "
+                  f"attempt {attempt + 1}/3")
+            if attempt < 2:
+                time.sleep(5)
+
+    # Model failed all attempts — generate basic HTML from raw text in Python.
+    print(f"[INFO] Page {page_num}: model layout failed ({last_err or 'no HTML returned'}), "
+          f"using Python-generated fallback layout.")
+    fallback_html = _raw_text_to_html(raw_text)
+    return fallback_html, None
+
+
 def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
     """
     ONE vision call producing both views of a page from a single reading.
@@ -774,7 +971,18 @@ def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
                 if layout:
                     layout = _unhw_letterhead(text, layout)
                     return text, _sanitize_html(layout), None
-                return text, None, "Layout section missing from combined output."
+                # Combined call gave text but no layout section.
+                # Always generate layout — first try the model, then
+                # fall back to Python. This path MUST return an HTML string.
+                print(f"[INFO] Page {page_num}: combined output had no layout "
+                      f"section — running dedicated layout call.")
+                layout_html, _layout_err = _generate_layout(b64_image, page_num, text)
+                # _generate_layout guarantees non-None (Python fallback at end)
+                # but guard anyway.
+                if not layout_html:
+                    layout_html = _raw_text_to_html(text)
+                layout_html = _unhw_letterhead(text, layout_html)
+                return text, _sanitize_html(layout_html), None
             print(f"[WARNING] Page {page_num} combined read empty/unusable, attempt {attempt + 1}/4")
             if attempt < 3:
                 time.sleep(3)
@@ -788,7 +996,10 @@ def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
     # so fall back to the proven text-only call (raises on total failure).
     print(f"[WARNING] Page {page_num}: combined call failed ({last_err}); falling back to text-only call")
     text = read_prescription_image(b64_image, page_num, mime)
-    return text, None, f"Layout unavailable: combined page read failed ({last_err or 'empty output'})."
+    # Generate layout from the text-only result using the Python fallback
+    # so the layout panel always shows something.
+    layout_html = _raw_text_to_html(text)
+    return text, _sanitize_html(layout_html), None
 
 
 # Structured-fields call attaches at most this many page images.

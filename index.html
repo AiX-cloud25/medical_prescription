@@ -963,12 +963,34 @@
         setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "extracting" } : d)));
         (async () => {
           try {
+            // Step 1 — POST the file, get a job_id back immediately (no timeout risk)
             const fd = new FormData();
             fd.append("file", item.file, item.file.name);
             const res = await fetch("/api/extract", { method: "POST", body: fd });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || data.error || `Server error (${res.status})`);
-            setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "processed", result: data } : d)));
+            const startData = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(startData.detail || startData.error || `Server error (${res.status})`);
+
+            const jobId = startData.job_id;
+            if (!jobId) throw new Error("Server did not return a job_id");
+
+            // Step 2 — Poll GET /api/jobs/{job_id} until done or error
+            const POLL_INTERVAL_MS = 4000;
+            const MAX_POLLS = 900; // 4s × 900 = 60 min max
+            for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
+              await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+              const pollRes = await fetch(`/api/jobs/${jobId}`);
+              const data = await pollRes.json().catch(() => ({}));
+              if (!pollRes.ok) throw new Error(data.detail || `Poll error (${pollRes.status})`);
+              if (data.status === "done") {
+                setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "processed", result: data } : d)));
+                return; // success — finally block handles cleanup
+              }
+              if (data.status === "error") {
+                throw new Error(data.error || "Extraction failed on server");
+              }
+              // status is "queued" or "running" — keep polling
+            }
+            throw new Error("Extraction timed out after 60 minutes");
           } catch (e) {
             setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "error", error: String(e.message || e) } : d)));
           } finally {

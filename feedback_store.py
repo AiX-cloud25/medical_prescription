@@ -87,6 +87,26 @@ CREATE TABLE {s}.raw_corrections (
     corrected_text NVARCHAR(MAX) NOT NULL,
     created_at     DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET()
 );
+
+IF OBJECT_ID('{s}.raw_extractions', 'U') IS NULL
+CREATE TABLE {s}.raw_extractions (
+    id              INT IDENTITY(1,1) PRIMARY KEY,
+    doc_hash        NVARCHAR(64) NOT NULL,
+    filename        NVARCHAR(400),
+    page_number     INT NOT NULL DEFAULT 1,
+    raw_text        NVARCHAR(MAX),
+    layout_html     NVARCHAR(MAX),
+    layout_error    NVARCHAR(MAX),
+    extracted_at    DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT uq_raw_extractions_hash_page UNIQUE (doc_hash, page_number)
+);
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'idx_raw_extractions_hash'
+      AND object_id = OBJECT_ID('{s}.raw_extractions')
+)
+CREATE INDEX idx_raw_extractions_hash ON {s}.raw_extractions (doc_hash);
 """
     conn = _connect()
     try:
@@ -378,6 +398,80 @@ def _learnable(triples: list) -> list:
         (p, c) for p, c, _a in triples
         if not _has_placeholder(p, c)
         and len(_core(p)) >= _MIN_LEARN_CHARS and len(_core(c)) >= _MIN_LEARN_CHARS
+    ]
+
+
+def save_raw_extraction(doc_hash: str, filename: str, pages: list) -> None:
+    """
+    Persist the raw model extraction for every page of a document immediately
+    after extraction, before any human correction is applied.
+    pages: [{"page": int, "text": str, "layout_html": str|None, "layout_error": str|None}]
+    Uses UPSERT (update then insert) — re-uploading the same file refreshes
+    the stored extraction. Never raises; failures are logged and swallowed so
+    they cannot break the extract endpoint.
+    """
+    if not pages:
+        return
+    s = _schema()
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            for p in pages:
+                page_num = p.get("page", 1)
+                raw_text = p.get("text") or ""
+                layout_html = p.get("layout_html") or None
+                layout_error = p.get("layout_error") or None
+                cur.execute(
+                    f"""UPDATE {s}.raw_extractions
+                        SET filename     = %s,
+                            raw_text     = %s,
+                            layout_html  = %s,
+                            layout_error = %s,
+                            extracted_at = SYSDATETIMEOFFSET()
+                        WHERE doc_hash = %s AND page_number = %s""",
+                    (filename or None, raw_text, layout_html, layout_error,
+                     doc_hash, page_num),
+                )
+                if cur.rowcount == 0:
+                    cur.execute(
+                        f"""INSERT INTO {s}.raw_extractions
+                            (doc_hash, filename, page_number, raw_text, layout_html, layout_error)
+                            VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (doc_hash, filename or None, page_num,
+                         raw_text, layout_html, layout_error),
+                    )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_raw_extraction(doc_hash: str) -> list:
+    """
+    Retrieve stored raw extraction pages for a document (ordered by page).
+    Returns [] if nothing stored. Raises on DB error.
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT page_number, raw_text, layout_html, layout_error, extracted_at
+                    FROM {_schema()}.raw_extractions
+                    WHERE doc_hash = %s
+                    ORDER BY page_number""",
+                (doc_hash,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "page": row[0],
+            "text": row[1],
+            "layout_html": row[2],
+            "layout_error": row[3],
+            "extracted_at": str(row[4]) if row[4] else None,
+        }
+        for row in rows
     ]
 
 
