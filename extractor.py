@@ -70,6 +70,27 @@ CORE RULES
   Example: lymphadenopathy(?)
 
 --------------------------------------
+PAGE TYPE — CHOOSE THE RIGHT FORMAT
+--------------------------------------
+
+Decide the page type FIRST, then format the whole page accordingly.
+
+A. TABULAR REPORT PAGE
+   (lab / haematology / biochemistry / investigation results printed
+   as a grid of rows and columns)
+   - Output the report header (facility, patient details, dates)
+     first as Label : Value lines.
+   - Output the results as a pipe-separated table (rule 6).
+
+B. PRESCRIPTION / CLINIC NOTE PAGE
+   (mostly handwritten; no printed results grid)
+   - NEVER force this content into a table.
+   - Output the letterhead / header first (if present).
+   - Then patient details as Label : Value lines (if present).
+   - Then every prescription item or note on its own line, top to
+     bottom, exactly in the order written on the page.
+
+--------------------------------------
 OUTPUT STRUCTURE
 --------------------------------------
 
@@ -78,11 +99,13 @@ Convert structured fields into:
   Label : Value
 
 Examples:
-  Name : Meena
-  Age : 41
-  Hospital No. : 14179/26
+  Name : Kavitha
+  Age : 38
+  Hospital No. : 10452/25
 
 Preserve slashes, punctuation and formatting exactly.
+(The names and numbers above are format examples only — never copy
+them into your output; always read the actual values from the page.)
 
 5. SECTION HEADINGS
 Preserve printed section headings in UPPERCASE.
@@ -103,6 +126,20 @@ Maintain row order and column alignment.
 For paragraphs, clinic notes and histories:
 - Preserve wording exactly.
 - Output each note or sentence on its own line.
+
+8. MULTIPLE GROUPS ON THE SAME ROW
+Handwritten pages often contain SEVERAL separate groups of writing on
+the SAME horizontal row — e.g. one group on the left, a gap, then a
+second group written on the right (side-by-side columns of drugs,
+doses, vitals or notes).
+- Scan every row across its FULL width, from the left edge to the
+  right edge, before moving down to the next row.
+- After transcribing the left group, look at the middle and the right
+  of the SAME row and transcribe any further writing found there.
+- Never stop at the first group; never drop writing on the right side
+  of a row.
+- Output side-by-side groups either on one line separated by " | ",
+  or as consecutive lines in left-to-right order.
 
 --------------------------------------
 CIRCLE-IF-POSITIVE CHECKLISTS
@@ -169,7 +206,7 @@ DOCUMENT NUMBERS
 --------------------------------------
 
 Preserve all identifiers exactly.
-  14179/26 must remain 14179/26
+  10452/25 must remain 10452/25
 Never merge digits or remove slashes.
 
 --------------------------------------
@@ -189,8 +226,13 @@ _READ_USER = (
     "Formatting rules:\n"
     "- Form fields → Label : Value\n"
     "- Section headings → Preserve exactly as shown\n"
-    "- Tables → Preserve as structured tables with rows and columns\n"
-    "- Paragraphs and notes → Keep each statement on its own line\n\n"
+    "- Tabular report pages (lab/investigation results printed as a grid) → "
+    "pipe-separated table\n"
+    "- Prescription / clinic-note pages → header first, then patient details "
+    "as Label : Value, then each item on its own line — NEVER as a table\n"
+    "- Paragraphs and notes → Keep each statement on its own line\n"
+    "- Rows with several handwritten groups side-by-side → scan the FULL row "
+    "width and transcribe every group, left to right\n\n"
     "Circle-If-Positive checklists (ONLY when the label is printed on this page):\n"
     "- Extract ALL printed symptoms/items under each checklist section.\n"
     "- Detect clinician selections including circles, ticks, checks, "
@@ -260,6 +302,12 @@ Tables           Use real HTML tables.
 Checklist blocks Use lists or paragraph blocks.
 Narrative notes  Use paragraphs.
 
+Use a real HTML <table> ONLY when the page itself shows a genuine
+printed grid of rows and columns (lab / investigation reports).
+Prescription pages and handwritten clinic notes must NOT be converted
+into tables — render them as a header, label:value lines, and
+line-by-line notes in the order written on the page.
+
 ------------------------------------
 HANDWRITING
 ------------------------------------
@@ -300,7 +348,7 @@ ACCURACY RULES
 - Never omit visible content.
 - Never hallucinate content.
 - Preserve dates and hospital numbers exactly.
-- Preserve slashes (14179/26 remains 14179/26).
+- Preserve slashes (10452/25 remains 10452/25).
 - Use (?) for uncertain words.
 - Never use [illegible].
 """
@@ -420,6 +468,13 @@ _PAGE_USER = (
     "- Do not summarize.\n"
     "- Never output [illegible].\n"
     "- If uncertain, provide your best reading and append '(?)'.\n\n"
+    "Formatting requirements:\n"
+    "- Tabular report pages (printed grid of results) → table format in both "
+    "sections (pipe table in RAW, <table> in HTML).\n"
+    "- Prescription / clinic-note pages → header first, then details, then "
+    "line-by-line items — NEVER forced into a table in either section.\n"
+    "- Scan each handwritten row across its FULL width — transcribe every "
+    "group on the row (left, middle, right), not just the first group.\n\n"
     "Return only the two contracted sections."
 )
 
@@ -613,6 +668,57 @@ def _sanitize_html(fragment: str) -> str:
     return fragment.strip()
 
 
+# Values that exist ONLY as format examples inside the prompts above.
+# If one shows up in the output, the model echoed the prompt instead of
+# reading the page — remove the echo so it can never leak into a document.
+_PROMPT_ECHO_VALUES = ("Kavitha", "10452/25")
+_PROMPT_ECHO_LINES = {
+    "name : kavitha",
+    "age : 38",
+    "hospital no. : 10452/25",
+    "hb        | 12.8   | 11.0 - 14.0",
+    "test name | result | reference range",
+}
+
+
+def _clean_checklist_sections(text: str) -> str:
+    """
+    Conservative post-pass on the raw transcription:
+      • drop lines that are verbatim echoes of prompt format examples
+        (fabricated names/numbers that cannot come from a real page);
+      • collapse runaway repetition (the same line emitted 3+ times in a
+        row is a decoding loop, not page content).
+    Never raises; returns the text otherwise unchanged.
+    """
+    if not text:
+        return text
+    out = []
+    prev, run = None, 0
+    for line in text.splitlines():
+        key = " ".join(line.split()).lower()
+        if key in _PROMPT_ECHO_LINES:
+            continue
+        if key and key == prev:
+            run += 1
+            if run >= 3:
+                continue
+        else:
+            prev, run = key, 1
+        out.append(line)
+    return "\n".join(out)
+
+
+def _clean_checklist_html(html: str) -> str:
+    """Remove prompt-example echoes from the layout HTML. Never raises."""
+    if not html:
+        return html
+    for val in _PROMPT_ECHO_VALUES:
+        html = re.sub(
+            r"(?<![A-Za-z0-9])" + re.escape(val) + r"(?![A-Za-z0-9])",
+            "", html)
+    return html
+
+
 # Crops embedded into the layout are capped to this long-edge size.
 _CROP_MAX_EDGE = 500
 _CROP_PAD_PCT = 2.0
@@ -708,7 +814,7 @@ _LOCAL_RULES = (
     "5. NUMBERS AND IDENTIFIERS\n"
     "Preserve all numbers, slashes, dates, registration numbers, hospital numbers, "
     "and identifiers exactly as written.\n"
-    "Example: 14179/26 must remain 14179/26\n"
+    "Example: 10452/25 must remain 10452/25\n"
     "Never merge, split, reformat, or normalize numeric values.\n\n"
 
     "6. UNCERTAIN TEXT\n"
@@ -729,7 +835,18 @@ _LOCAL_RULES = (
     "9. HANDWRITTEN CONTENT\n"
     "Extract handwritten text with the same importance as printed text.\n"
     "Include all handwritten annotations, corrections, markings, numeric values, "
-    "dates, and comments visible on the page.\n"
+    "dates, and comments visible on the page.\n\n"
+
+    "10. FULL-ROW SCANNING\n"
+    "Handwritten pages often contain a SECOND group of writing after a gap on "
+    "the SAME row (side-by-side groups or columns). Scan every row across its "
+    "full width — left edge to right edge — and transcribe every group on the "
+    "row, left to right. Never drop the group on the right.\n\n"
+
+    "11. PAGE-TYPE FORMAT\n"
+    "Format tabular report pages (printed grids of lab/investigation results) "
+    "as tables. Format prescription and clinic-note pages as header + patient "
+    "details + line-by-line items, never as a table.\n"
 )
 
 # Commands appended to the USER message — processed last before generation.
@@ -739,10 +856,14 @@ _LOCAL_USER_RULES = (
     "- Every visible item is included: top to bottom, left to right.\n"
     "- Circle-if-Positive sections: ALL items listed, selected ones marked (Circled).\n"
     "- Circled symbols: (+) (-) (L) (R) — never @.\n"
-    "- All numbers and slashes preserved exactly (e.g. 14179/26).\n"
+    "- All numbers and slashes preserved exactly (e.g. 10452/25).\n"
     "- No [illegible] — use best guess with (?) for uncertain text.\n"
     "- No hallucination — only what is physically visible on this page.\n"
     "- Handwritten text extracted with same priority as printed text.\n"
+    "- Every row scanned across its FULL width — no group on the middle or "
+    "right side of a row is missed.\n"
+    "- Tabular reports formatted as tables; prescriptions line-by-line, "
+    "never forced into a table.\n"
 )
 
 
@@ -983,7 +1104,10 @@ _LAYOUT_SLIM_SYSTEM = (
     "- NO position:absolute, NO negative margins.\n"
     "- Mirror the image structure: single-column page → single column HTML. "
     "Two-column page → flex row. Printed symptom list → <p> not <table>. "
-    "Form with label+handwritten answer → <table> two columns.\n"
+    "Form with label+handwritten answer → <table> two columns. "
+    "Lab/investigation report with a printed results grid → real <table>. "
+    "Handwritten prescription / clinic note → line-by-line <div>s in writing "
+    "order, NEVER a fabricated table.\n"
     "- Letterhead centered at top. Bottom items (date, signature) last.\n"
     "- Describe annotations: e.g. <span class=\"hw\">[circled: Early]</span> or "
     "<span class=\"hw\">[arrow → Lymph nodes, Pallor +]</span>.\n"
@@ -1151,33 +1275,15 @@ def read_page(
     return text, _sanitize_html(layout_html), None
 
 
-# Structured-fields call attaches at most this many page images.
+# Structured-fields calls attach at most this many page images per call;
+# longer documents are processed in chunks and the results merged, so no
+# page is ever silently dropped.
 _FIELDS_MAX_PAGES = 5
 
 
-def read_structured_fields(images: list) -> tuple:
-    """
-    One call for the whole document: images = [(page_num, b64, mime), ...].
-    Returns ({"fields": [...], "medicines": [...]}, None) on success or
-    ({}, error_message) — never raises.
-    """
-    try:
-        _check_ollama()
-    except ExtractorError as e:
-        return {}, str(e)
-
-    # Few-shot learning from human feedback: append past corrections to the
-    # system prompt at call time so new corrections apply without a restart.
-    system_prompt = _FIELDS_SYSTEM
-    try:
-        _examples = feedback_store.get_examples_for_prompt()
-        if _examples:
-            system_prompt = _FIELDS_SYSTEM + "\n\n" + _examples
-            print("[INFO] Injected learned-corrections block:\n" + _examples)
-    except Exception as e:
-        print(f"[WARNING] Corrections lookup skipped (Postgres unavailable?): {e}")
-
-    images = images[:_FIELDS_MAX_PAGES]
+def _fields_single_call(system_prompt: str, images: list) -> tuple:
+    """One structured-fields call over a chunk of pages, with retries.
+    Returns ({"fields": [...], "medicines": [...]}, None) or ({}, error)."""
     images_b64 = [b64 for _, b64, _ in images]
     # Build a page-labeling preamble so the model knows which image = which page
     page_labels = ", ".join(f"image {i+1} = page {n}" for i, (n, _, _) in enumerate(images))
@@ -1210,6 +1316,74 @@ def read_structured_fields(images: list) -> tuple:
             if attempt < 3:
                 time.sleep(5)
     return {}, f"Structured field extraction failed: {last_err}"
+
+
+def read_structured_fields(images: list) -> tuple:
+    """
+    Structured extraction for the whole document:
+    images = [(page_num, b64, mime), ...].
+    Documents longer than _FIELDS_MAX_PAGES are processed in page chunks
+    and the chunk results merged (fields deduped by key, medicines by name)
+    so every page contributes. Returns ({"fields": [...], "medicines": [...]},
+    error|None) — never raises.
+    """
+    try:
+        _check_ollama()
+    except ExtractorError as e:
+        return {}, str(e)
+
+    # Few-shot learning from human feedback: append past corrections to the
+    # system prompt at call time so new corrections apply without a restart.
+    system_prompt = _FIELDS_SYSTEM
+    try:
+        _examples = feedback_store.get_examples_for_prompt()
+        if _examples:
+            system_prompt = _FIELDS_SYSTEM + "\n\n" + _examples
+            print("[INFO] Injected learned-corrections block:\n" + _examples)
+    except Exception as e:
+        print(f"[WARNING] Corrections lookup skipped (Postgres unavailable?): {e}")
+
+    all_fields, all_medicines, errors = [], [], []
+    for start in range(0, len(images), _FIELDS_MAX_PAGES):
+        chunk = images[start:start + _FIELDS_MAX_PAGES]
+        data, err = _fields_single_call(system_prompt, chunk)
+        if err:
+            errors.append(err)
+            continue
+        all_fields.extend(f for f in data["fields"] if isinstance(f, dict))
+        all_medicines.extend(m for m in data["medicines"] if isinstance(m, dict))
+
+    if not all_fields and not all_medicines and errors:
+        return {}, "; ".join(errors)
+
+    # Merge across chunks: first occurrence of a field key wins, except a
+    # '(blank)' value is upgraded when a later chunk found a real value.
+    merged_fields, by_key = [], {}
+    for f in all_fields:
+        k = str(f.get("key") or f.get("name") or "").strip().lower()
+        if not k:
+            merged_fields.append(f)
+            continue
+        if k in by_key:
+            old = by_key[k]
+            oldv = str(old.get("value") or "").strip()
+            newv = str(f.get("value") or "").strip()
+            if oldv in ("", "(blank)") and newv not in ("", "(blank)"):
+                old["value"] = newv
+            continue
+        by_key[k] = f
+        merged_fields.append(f)
+
+    merged_meds, seen_med = [], set()
+    for m in all_medicines:
+        sig = re.sub(r"[^a-z0-9]+", "", str(m.get("medicine") or "").lower())
+        if sig and sig in seen_med:
+            continue
+        seen_med.add(sig)
+        merged_meds.append(m)
+
+    return ({"fields": merged_fields, "medicines": merged_meds},
+            "; ".join(errors) if errors else None)
 
 
 def _render_pdf_pages(data: bytes) -> list:
