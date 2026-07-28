@@ -605,13 +605,83 @@ def _fix_circled_symbols(text: str) -> str:
 def _clean_checklist_sections(text: str) -> str:
     """
     Post-process model raw text:
-    1. For Circle-if-Positive checklist sections: ALWAYS strip the full
-       printed symptom list. Keep only items the model explicitly marked
-       as (circled). If no (circled) markers found, output heading with
-       blank value — the full list is never correct output.
-    2. Fix circled symbol notation (@, bare (circled), etc.)
+    1. Detect if this page actually contains a Circle-if-Positive checklist.
+       If not (clinic prescription, follow-up note, etc.) — remove ALL
+       hallucinated checklist section lines entirely.
+    2. If the page does have a checklist, strip full printed symptom lists
+       and keep only (circled) items.
+    3. Fix circled symbol notation.
     """
-    # Build compiled patterns once
+    # ── Step 0: Detect if this page actually has a checklist ──────────────
+    # The Surgical Case Record / Medical Case Record has a printed
+    # "(Circle If Positive)" label and known section headings together.
+    # A page without this label but with the section headings = hallucination.
+    has_circle_if_positive_label = bool(re.search(
+        r"Circle\s*If\s*Positive|Circle\s*if\s*Positive",
+        text, re.IGNORECASE,
+    ))
+    # Count how many checklist section headings appear in the text
+    checklist_heading_count = sum(
+        1 for _, pat in _CIRCLE_IF_POSITIVE_SECTIONS
+        if re.search(pat, text, re.IGNORECASE)
+    )
+    # Known markers that ONLY appear on clinic/follow-up pages, NOT on
+    # the Surgical Case Record that has the checklist
+    clinic_markers = bool(re.search(
+        r"KPME\s*Reg|Centre\s*for\s*Advanced|Sarthaka|Sarvodaya|"
+        r"FOLLOW[\s\-]*UP\s*NOTES?|Dr\.\s*[A-Z]\.\s*[A-Z]\.\s*Suresh|"
+        r"C\s*-\s*\d+\s*/\s*\d{4}",
+        text, re.IGNORECASE,
+    ))
+
+    # If page has clinic markers OR lacks the "Circle If Positive" label
+    # AND has checklist headings → they're hallucinated, strip them all
+    page_has_real_checklist = has_circle_if_positive_label or (
+        checklist_heading_count >= 3 and not clinic_markers
+    )
+
+    if not page_has_real_checklist and checklist_heading_count > 0:
+        # Remove all lines that are checklist section headings or their
+        # continuation lines
+        sec_patterns_rx = [
+            re.compile(r"^\s*" + pat, re.IGNORECASE)
+            for _, pat in _CIRCLE_IF_POSITIVE_SECTIONS
+        ]
+        lines = text.splitlines(keepends=True)
+        output = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.rstrip("\n").strip()
+            is_checklist = any(rx.match(stripped) for rx in sec_patterns_rx)
+            if is_checklist:
+                # Skip this heading and any blank continuation
+                i += 1
+                while i < len(lines):
+                    next_s = lines[i].rstrip("\n").strip()
+                    if any(rx.match(next_s) for rx in sec_patterns_rx):
+                        break
+                    if next_s and not re.match(r"^\s*$", next_s):
+                        # Non-blank continuation — check if it looks like
+                        # a symptom list (if so, skip it too)
+                        if not re.search(
+                            r"COMPLAINTS|HISTORY\s*OF\s*PRESENT|EXAMINATION|"
+                            r"INVESTIGATIONS|PROPOSED|DIAGNOSIS|STAGE|[Cc]/[Oo]",
+                            next_s, re.IGNORECASE
+                        ):
+                            i += 1
+                            continue
+                    break
+                continue
+            output.append(line)
+            i += 1
+        text = "".join(output)
+        # Still fix symbol notation
+        text = _fix_circled_symbols(text)
+        text = _clean_stage_grids(text)
+        return text
+
+    # ── Step 1: Page has real checklist — strip symptom lists ─────────────
     sec_patterns = [
         (name, re.compile(r"^\s*" + pat, re.IGNORECASE))
         for name, pat in _CIRCLE_IF_POSITIVE_SECTIONS
@@ -625,7 +695,6 @@ def _clean_checklist_sections(text: str) -> str:
         line = lines[i]
         stripped = line.rstrip("\n").strip()
 
-        # Does this line start a Circle-if-Positive section?
         matched_name = None
         for name, rx in sec_patterns:
             if rx.match(stripped):
@@ -637,7 +706,7 @@ def _clean_checklist_sections(text: str) -> str:
             i += 1
             continue
 
-        # Collect this section's content (this line + continuation lines)
+        # Collect section content
         section_text = stripped
         i += 1
         while i < len(lines):
@@ -650,8 +719,6 @@ def _clean_checklist_sections(text: str) -> str:
                 section_text += " " + next_stripped
             i += 1
 
-        # Extract circled items BEFORE any cleaning removes the markers.
-        # Split by (circled) — each split point = one circled item before it.
         colon_pos = section_text.find(":")
         content = section_text[colon_pos + 1:] if colon_pos != -1 else section_text
 
@@ -659,7 +726,6 @@ def _clean_checklist_sections(text: str) -> str:
         items = []
         for part in parts[:-1]:
             candidate = part.rstrip(", \t")
-            # Take the last comma-delimited token — that's the symptom name
             comma_parts = [p.strip() for p in candidate.split(",") if p.strip()]
             if comma_parts:
                 item = comma_parts[-1].strip()
@@ -670,11 +736,8 @@ def _clean_checklist_sections(text: str) -> str:
         output.append(f"{matched_name} : {circled_str}\n")
 
     result = "".join(output)
-    # Fix symbol notation on everything that's left
     result = _fix_circled_symbols(result)
-    # Strip blank TNM staging grids
     result = _clean_stage_grids(result)
-    # Deduplicate checklist sections — keep only the FIRST occurrence of each
     result = _dedup_checklist_sections(result)
     return result
 
@@ -988,12 +1051,15 @@ _LOCAL_RULES = (
     "The left column has printed symptom lists under headings: GENERAL, "
     "G.I. TRACT, ENT (INCLUDING ORAL CAVITY), BREAST, G.U. TRACT, "
     "MUSCULO-SKELETAL SYSTEM, PAST HISTORY, FAMILY HISTORY.\n"
-    "For EACH heading: output heading + colon, then ONLY the circled words.\n"
-    "Nothing circled → blank after the colon.\n"
-    "CORRECT:  G.I. TRACT :\n"
-    "CORRECT:  FAMILY HISTORY : Diabetes\n"
-    "WRONG:    G.I. TRACT : Anorexia, Indigestion, Dysphagia...\n"
-    "NEVER copy the printed symptom list. NEVER add '(none circled)'.\n\n"
+    "ONLY output these sections if they are PHYSICALLY PRINTED on the page "
+    "you are reading. If the page is a clinic prescription, follow-up note, "
+    "discharge summary, or any other document that does NOT have these "
+    "printed headings → do NOT output them at all.\n"
+    "For pages that DO have these headings: output heading + colon, "
+    "then ONLY the circled words. Nothing circled = blank after the colon.\n"
+    "CORRECT (Surgical Case Record page): GENERAL :\n"
+    "CORRECT (Clinic prescription page): do not output GENERAL at all\n"
+    "WRONG: outputting GENERAL/G.I.TRACT etc. on every page regardless\n\n"
     "RULE 5 — CIRCLED SYMBOLS:\n"
     "Circle with '+' inside → write (+)\n"
     "Circle with '-' inside → write (-)\n"
@@ -1023,9 +1089,13 @@ _LOCAL_USER_RULES = (
     "1. FIRST: transcribe the printed letterhead and form title from the top.\n"
     "2. PLAIN TEXT ONLY: no hw class anywhere. All text plain.\n"
     "3. CHECKLISTS (GENERAL / G.I. TRACT / ENT / BREAST / G.U. TRACT / "
-    "MUSCULO-SKELETAL / PAST HISTORY / FAMILY HISTORY): output heading + colon. "
-    "After colon: ONLY circled words. Nothing circled = blank. "
-    "DO NOT copy the printed symptom list. Output each section ONCE only.\n"
+    "MUSCULO-SKELETAL / PAST HISTORY / FAMILY HISTORY): "
+    "ONLY output these sections if they are PHYSICALLY PRINTED on THIS page. "
+    "If this page is a clinic prescription, follow-up note, investigation form, "
+    "or any page that does NOT have these printed headings visible → "
+    "do NOT output them at all. "
+    "If present on this page: heading + colon, then ONLY circled words. "
+    "Nothing circled = blank after colon. Each section ONCE only.\n"
     "4. CIRCLED SYMBOLS: (+) = circled plus, (-) = circled minus, "
     "(L) = circled L, (R) = circled R. NEVER write '@'.\n"
     "5. HOSPITAL NO: preserve slash — '14179/26' not '1417926'.\n"
