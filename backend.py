@@ -235,14 +235,17 @@ async def _run_extraction(job_id: str, data: bytes, ext: str, filename: str):
         except Exception as e:
             print(f"[WARNING] Auto-correct dictionary skipped (Postgres unavailable?): {e}")
 
-        # ── Exact-document replay ─────────────────────────────────
+        # ── Human-correction replay (only if human explicitly edited) ─
+        # get_raw_correction() now returns None for auto-saved raw extractions
+        # (corrected_text == original_text). Only a human edit produces a
+        # corrected_text that differs — and only that is replayed here.
         raw_text_corrected = False
         try:
             stored = feedback_store.get_raw_correction(doc_hash)
             if stored is not None:
                 raw_text = stored
                 raw_text_corrected = True
-                print(f"[INFO] Replayed stored raw-text correction for {filename} ({doc_hash[:12]}…)")
+                print(f"[INFO] Replayed human correction for {filename} ({doc_hash[:12]}…)")
                 pairs = feedback_store.get_raw_correction_pairs(doc_hash)
                 if pairs:
                     total = 0

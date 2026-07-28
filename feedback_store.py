@@ -609,18 +609,32 @@ def get_raw_correction_pairs(doc_hash: str) -> list:
 
 
 def get_raw_correction(doc_hash: str):
-    """Stored corrected raw text for this exact document, or None. Raises on DB error."""
+    """
+    Returns the human-corrected text for this document ONLY if a human
+    explicitly edited it (corrected_text differs from original_text).
+    Returns None if no row exists OR if corrected_text == original_text
+    (meaning it was auto-saved by the system with no human edit).
+    Raises on DB error.
+    """
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT corrected_text FROM {_schema()}.raw_corrections WHERE doc_hash = %s",
+                f"""SELECT corrected_text, original_text
+                    FROM {_schema()}.raw_corrections
+                    WHERE doc_hash = %s""",
                 (doc_hash,),
             )
             row = cur.fetchone()
     finally:
         conn.close()
-    return row[0] if row else None
+    if not row:
+        return None
+    corrected_text, original_text = row[0], row[1]
+    # Only replay if a human actually changed the text
+    if corrected_text and original_text and corrected_text.strip() == original_text.strip():
+        return None  # auto-saved raw extraction — run fresh
+    return corrected_text if corrected_text else None
 
 
 def delete_raw_correction(doc_hash: str) -> tuple:
