@@ -801,7 +801,7 @@ def _clean_checklist_html(html: str) -> str:
     return html
 
 
-
+def _strip_fences(text: str) -> str:
     """Remove a wrapping ```lang ... ``` fence if the model added one."""
     text = text.strip()
     m = re.match(r"^```[a-zA-Z]*\s*\n(.*)\n?```$", text, re.DOTALL)
