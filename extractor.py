@@ -721,7 +721,78 @@ def _clean_stage_grids(text: str) -> str:
     return "".join(output)
 
 
-def _strip_fences(text: str) -> str:
+def _clean_checklist_html(html: str) -> str:
+    """
+    Strip the full printed symptom lists from Circle-if-Positive sections
+    in the layout HTML. After the section heading element, remove all child
+    text nodes / spans that contain the printed symptom list.
+
+    Strategy: for each known checklist section heading found in the HTML,
+    replace everything between that heading and the next heading (or
+    right-column marker) with just the heading element.
+
+    This is less precise than the text cleaner but good enough since the
+    model typically puts the whole section as a flat block.
+    """
+    if not html:
+        return html
+
+    # Build a combined regex of all section heading patterns as they appear in HTML.
+    # The model wraps headings in bold, <div>, <p>, or <span> tags.
+    heading_text_patterns = [
+        r"GENERAL",
+        r"G\.?I\.?\s*TRACT",
+        r"ENT\s*[\(\[]?INCLUDING\s*ORAL\s*CAVITY[\)\]]?",
+        r"BREAST",
+        r"G\.?U\.?\s*TRACT",
+        r"MUSCULO\s*[-\u2013]?\s*SKELETAL\s*(?:SY[SA]T[EA]M|SYSTEM)?",
+        r"PAST\s*HISTORY",
+        r"FAMILY\s*HISTORY",
+    ]
+
+    # Known symptom list words that prove the model copied the full list.
+    # If we find these after a checklist heading in the HTML, strip that block.
+    symptom_list_words = re.compile(
+        r"Anorexia|Indigestion|Dysphagia|Haematuria|Epistaxis|Nocturia|"
+        r"Sore\s*throat|Constipation|Tuberculosis|Trauma|Operations|"
+        r"Haematesis|Ulceration|Bleeding\s*per\s*Rectum|Fractures|"
+        r"Salivation|Hoarseness|Anosmia|Deafness|Peripheral|Vascular|"
+        r"Nipple|Dysuria|Vomit|Colic|Jaundice|Dyschezia|Swelling,|"
+        r"weight\s*loss|Chills|Unexplained\s*fever|Fatigue",
+        re.IGNORECASE,
+    )
+
+    for pat in heading_text_patterns:
+        # Find heading tag containing this text, followed by symptom list content.
+        # Match: <tag ...>...HEADING...</tag> then content with symptom words
+        # up to the next known heading or right-column section.
+        section_rx = re.compile(
+            r"(<(?:b|strong|div|p|span|td|h[1-6])\b[^>]*>"
+            r"[^<]*" + pat + r"[^<]*</(?:b|strong|div|p|span|td|h[1-6])>)"
+            r"((?:(?!(?:GENERAL|G\.?I\.?\s*TRACT|ENT|BREAST|G\.?U\.?\s*TRACT|"
+            r"MUSCULO|COMPLAINTS\s*AND\s*DURATION|HISTORY\s*OF\s*PRESENT|"
+            r"GENERAL\s*EXAMINATION).){0,3000}?))"
+            r"(?=<(?:b|strong|div|p|span|td|h[1-6])\b[^>]*>"
+            r"(?:GENERAL|G\.?I\.?\s*TRACT|ENT|BREAST|G\.?U\.?\s*TRACT|"
+            r"MUSCULO|COMPLAINTS\s*AND\s*DURATION|HISTORY\s*OF\s*PRESENT|"
+            r"GENERAL\s*EXAMINATION|PAST\s*HISTORY|FAMILY\s*HISTORY))",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        def _replace_if_symptom_list(m, _spx=symptom_list_words):
+            heading_tag = m.group(1)
+            content = m.group(2)
+            # Only strip if the content contains known symptom list words
+            if _spx.search(content):
+                return heading_tag + "\n"
+            return m.group(0)
+
+        html = section_rx.sub(_replace_if_symptom_list, html)
+
+    return html
+
+
+
     """Remove a wrapping ```lang ... ``` fence if the model added one."""
     text = text.strip()
     m = re.match(r"^```[a-zA-Z]*\s*\n(.*)\n?```$", text, re.DOTALL)
@@ -1246,8 +1317,10 @@ def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
             if text:
                 if layout:
                     layout = _unhw_letterhead(text, layout)
-                    # Post-process: fix checklist sections and symbol notation
+                    # Post-process text: fix checklist sections and symbol notation
                     text = _clean_checklist_sections(text)
+                    # Post-process HTML: strip symptom lists from layout too
+                    layout = _clean_checklist_html(layout)
                     return text, _sanitize_html(layout), None
                 # Combined call gave text but no layout section.
                 print(f"[INFO] Page {page_num}: combined output had no layout "
@@ -1257,6 +1330,7 @@ def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
                 if not layout_html:
                     layout_html = _raw_text_to_html(text)
                 layout_html = _unhw_letterhead(text, layout_html)
+                layout_html = _clean_checklist_html(layout_html)
                 return text, _sanitize_html(layout_html), None
             print(f"[WARNING] Page {page_num} combined read empty/unusable, attempt {attempt + 1}/4")
             if attempt < 3:
@@ -1273,6 +1347,7 @@ def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
     text = read_prescription_image(b64_image, page_num, mime)
     text = _clean_checklist_sections(text)
     layout_html = _raw_text_to_html(text)
+    layout_html = _clean_checklist_html(layout_html)
     return text, _sanitize_html(layout_html), None
 
 
