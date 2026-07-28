@@ -544,35 +544,78 @@ def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
 # Reinforcement appended AFTER the main system prompt.
 # These are the last instructions the model sees — highest recency weight.
 _LOCAL_RULES = (
-    "\n\nFINAL REMINDERS — apply these to every page:\n\n"
-    "1. THIS PAGE ONLY: Extract only what is in this single image. "
-    "Never add content from other pages or from memory.\n\n"
-    "2. COMPLETE EXTRACTION: Read every pixel — top to bottom, left to right. "
-    "Do not skip any text, number, or symbol. Every visible item must appear.\n\n"
-    "3. CIRCLE-IF-POSITIVE CHECKLISTS: When you see a column headed "
-    "'(Circle If Positive)' with printed symptom lists under GENERAL, "
-    "G.I. TRACT, ENT, BREAST, G.U. TRACT, MUSCULO-SKELETAL, PAST HISTORY, "
-    "FAMILY HISTORY — list ALL words in each section. Mark each word that "
-    "has a drawn circle around it with (circled). Unmarked words have no marker.\n\n"
-    "4. CIRCLED SYMBOLS: (+) = circled plus, (-) = circled minus, "
-    "(L) = circled L, (R) = circled R. NEVER write '@'.\n\n"
-    "5. NUMBERS WITH SLASHES: '14179/26' stays '14179/26'. Never merge.\n\n"
-    "6. NO [illegible]: Guess every word. Mark uncertain with (?). "
-    "A wrong guess is correctable. A blank is not.\n\n"
-    "7. NO HALLUCINATION: Only output text that is physically visible "
-    "in this image. Never invent content.\n"
+    "\n\nFINAL REMINDERS — APPLY THESE RULES TO EVERY PAGE\n\n"
+
+    "1. SINGLE-PAGE EXTRACTION\n"
+    "Extract only the content that is physically visible on the current page/image.\n"
+    "Do not use information from previous pages, subsequent pages, memory, or assumptions.\n\n"
+
+    "2. COMPLETE EXTRACTION\n"
+    "Read the entire page from top to bottom and left to right.\n"
+    "Extract every visible text element, handwritten note, printed text, number, symbol, "
+    "label, heading, stamp, and annotation.\n"
+    "Do not omit any visible content.\n\n"
+
+    "3. \"CIRCLE IF POSITIVE\" CHECKLISTS\n"
+    "When a section is labeled \"(Circle If Positive)\" and contains printed symptom or "
+    "condition lists under headings such as GENERAL, G.I. TRACT, ENT, BREAST, G.U. TRACT, "
+    "MUSCULO-SKELETAL SYSTEM, PAST HISTORY, FAMILY HISTORY, or similar sections:\n"
+    "- Extract ALL printed items exactly as written.\n"
+    "- Examine each item for clinician markings.\n"
+    "- A marked item may be circled, ticked, checked, underlined, crossed, highlighted, "
+    "or otherwise clearly selected.\n"
+    "- For every selected item, append (Circled) immediately after the item.\n"
+    "- For unselected items, output the item without any marker.\n"
+    "- Only use (Circled) when there is clear visual evidence of selection.\n"
+    "- Never infer selection from surrounding text or diagnoses.\n"
+    "Example:\n"
+    "  GENERAL : Fatigue (Circled), Weight loss, Chills, Unexplained fever\n"
+    "  FAMILY HISTORY : Cancer, Tuberculosis (Circled), Diabetes\n\n"
+
+    "4. CIRCLED SYMBOLS\n"
+    "Preserve circled symbols exactly as they appear:\n"
+    "  (+) = Circled Plus    (-) = Circled Minus\n"
+    "  (L) = Circled L       (R) = Circled R\n"
+    "Never replace these symbols with @, *, or any other character.\n\n"
+
+    "5. NUMBERS AND IDENTIFIERS\n"
+    "Preserve all numbers, slashes, dates, registration numbers, hospital numbers, "
+    "and identifiers exactly as written.\n"
+    "Example: 14179/26 must remain 14179/26\n"
+    "Never merge, split, reformat, or normalize numeric values.\n\n"
+
+    "6. UNCERTAIN TEXT\n"
+    "Do not use [illegible], [unreadable], or blanks.\n"
+    "If a word is difficult to read, provide your best interpretation and append (?) "
+    "to the uncertain word or phrase.\n"
+    "Example: lymphadenopathy(?)\n\n"
+
+    "7. NO HALLUCINATION\n"
+    "Output only information that is physically visible on the page.\n"
+    "Do not invent, infer, expand abbreviations, add medical interpretations, "
+    "or generate missing content.\n\n"
+
+    "8. PRESERVE ORIGINAL STRUCTURE\n"
+    "Maintain section headings, labels, field names, ordering, and document hierarchy "
+    "exactly as they appear on the page whenever possible.\n\n"
+
+    "9. HANDWRITTEN CONTENT\n"
+    "Extract handwritten text with the same importance as printed text.\n"
+    "Include all handwritten annotations, corrections, markings, numeric values, "
+    "dates, and comments visible on the page.\n"
 )
 
 # Commands appended to the USER message — processed last before generation.
 _LOCAL_USER_RULES = (
-    "\n\nEXTRACT this page completely:\n"
-    "- Start with the letterhead/header at the very top.\n"
-    "- Follow the document structure: tables as tables, paragraphs as lines.\n"
-    "- For Circle-if-Positive sections: list ALL words, mark circled ones with (circled).\n"
-    "- Circled symbols: (+) (-) (L) (R). Never '@'.\n"
-    "- Slashed numbers: preserve slash exactly.\n"
-    "- No [illegible]: guess everything with (?).\n"
-    "- No hallucination: only what's visible in THIS image.\n"
+    "\n\nBefore writing your output, verify:\n"
+    "- You are extracting ONLY from this single page image — no other pages.\n"
+    "- Every visible item is included: top to bottom, left to right.\n"
+    "- Circle-if-Positive sections: ALL items listed, selected ones marked (Circled).\n"
+    "- Circled symbols: (+) (-) (L) (R) — never @.\n"
+    "- All numbers and slashes preserved exactly (e.g. 14179/26).\n"
+    "- No [illegible] — use best guess with (?) for uncertain text.\n"
+    "- No hallucination — only what is physically visible on this page.\n"
+    "- Handwritten text extracted with same priority as printed text.\n"
 )
 
 
