@@ -626,11 +626,22 @@ def _clean_checklist_sections(text: str) -> str:
         if re.search(pat, text, re.IGNORECASE)
     )
     # Known markers that ONLY appear on clinic/follow-up pages, NOT on
-    # the Surgical Case Record that has the checklist
+    # the Surgical Case Record that has the checklist.
+    # Also detect haematology/lab reports which never have checklists.
     clinic_markers = bool(re.search(
-        r"KPME\s*Reg|Centre\s*for\s*Advanced|Sarthaka|Sarvodaya|"
-        r"FOLLOW[\s\-]*UP\s*NOTES?|Dr\.\s*[A-Z]\.\s*[A-Z]\.\s*Suresh|"
-        r"C\s*-\s*\d+\s*/\s*\d{4}",
+        r"KPME\s*Reg|Centre\s*for\s*Advanced|Sarthaka|Sarvodaya|Sudhesha|"
+        r"FOLLOW[\s\-]*UP\s*NOTES?|"
+        r"Dr\.\s*[A-Z][\w\.]*\s*Suresh|"
+        r"C\s*-\s*\d+\s*/\s*\d{4}|"          # case number format
+        r"HAEMATOLOGY\s*REPORT|HAEMOGRAM|"    # lab reports
+        r"Platelet\s*Count|Haemoglobin|"      # CBC values
+        r"Reference\s*Range|Verified\s*By|"   # lab report markers
+        r"End\s*of\s*Report|"
+        r"Age/Sex\s*:\s*\d+Y?/[MF]|"          # clinic format (not hospital)
+        r"Ref\s*\.\s*Fee|"                     # clinic fee
+        r"BMI\s*:\s*\d|"                       # clinic vitals inline
+        r"4\s*pm\s*to\s*6\s*pm|"              # clinic hours
+        r"Laparoscopy\s*&\s*Ultrasound",       # clinic speciality
         text, re.IGNORECASE,
     ))
 
