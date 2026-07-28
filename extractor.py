@@ -929,12 +929,30 @@ Start with an HTML tag."""
     return fallback_html, None
 
 
-def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
+def read_page(
+    b64_image: str,
+    page_num: int,
+    mime: str = "image/jpeg",
+) -> tuple[str, str | None, str | None]:
     """
-    ONE vision call producing both views of a page from a single reading.
-    Returns (text, layout_html|None, layout_error|None). The text is
-    mandatory: if the combined call cannot produce it, falls back to the
-    text-only call; raises ExtractorError only when that also fails.
+    Extracts a single medical-record page.
+
+    Performs a single vision-model read to produce:
+    - Complete OCR transcription
+    - Structured HTML layout
+    - Detection of handwritten annotations
+    - Preservation of form structure
+    - Recognition of '(Circle If Positive)' checklists
+
+    Returns:
+        (extracted_text, layout_html, layout_error)
+        The extracted text is mandatory.
+        A text-only fallback is automatically used when the
+        combined extraction cannot produce a reliable transcript.
+
+    Raises:
+        ExtractorError:
+            When a valid transcription cannot be obtained.
     """
     _check_ollama()
 
