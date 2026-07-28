@@ -1,4 +1,4 @@
-"""
+﻿"""
 extractor.py — Offline VLM engine via Ollama (qwen2.5vl)
 ────────────────────────────────────────────────────────
 Identical pipeline to the sibling doctor_prescription_gpt_extractor —
@@ -38,225 +38,84 @@ _NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 
 # Render resolution for PDF pages sent to the vision model.
-_RENDER_DPI = 150
+# 300 DPI gives much better quality for handwritten medical documents.
+_RENDER_DPI = 300
 _SCALE = _RENDER_DPI / 72
 
 # Output budget for the text-only transcription / structured-fields calls.
-_VISION_MAX_TOKENS = 12000
+_VISION_MAX_TOKENS = 20000
 
 _MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
 _READ_SYSTEM = (
-    "You are an expert medical document reader assisting a licensed pharmacy "
-    "team with digitizing prescriptions and hospital forms the patient has "
-    "already provided. Reconstruct the ENTIRE page as a clean, structured FORM "
-    "TEMPLATE — not as a flat stream of OCR text. Doctor handwriting is often "
-    "messy, so read carefully.\n\n"
-    "FORMAT RULES (plain text only — no markdown symbols like # or **):\n"
-    "- Reproduce the document's own structure: title/letterhead centered at "
-    "the top, then each printed section in the order it appears on the page.\n"
-    "- Render section headings on their own line in UPPERCASE exactly as "
-    "printed (e.g. GENERAL:, EXAMINATION:, TREATMENT PROPOSED:), followed by "
-    "their contents indented by two spaces.\n"
-    "- Render every printed field as 'Label : value'. If the field is filled "
-    "in by hand, put the handwritten value after the label. If it is empty, "
-    "write '(blank)'. Keep related fields grouped on one line when the form "
-    "prints them side by side (e.g. 'Sex : M / F    Unit : (blank)    Ward : (blank)').\n"
-    "- PATIENT HEADER LINE: forms like Surgical Case Record have a header row "
-    "with Name, Age, Sex, Hospital No. all on one line. The patient's name, "
-    "age, sex and hospital number are handwritten in the spaces provided. "
-    "Read each field value carefully — Age and Hospital No. are numbers "
-    "written by hand. Extract them as written. Example:\n"
-    "    Name : Meena    Age : 41    Sex : F    Hospital No. : 14179/26\n"
-    "  The hospital number often has a slash (14179/26) — preserve it exactly.\n"
-    "- When the form offers printed options and one is circled/ticked/"
-    "underlined, show all options and mark the chosen one, e.g. "
-    "'Stage : Early / 2 / 3 / Late  ->  circled: Early'.\n"
-    "- CIRCLE-IF-POSITIVE SYMPTOM CHECKLISTS: many forms (e.g. Surgical "
-    "Case Record) have a left column of printed symptom lists under headings "
-    "like GENERAL, G.I. TRACT, ENT (INCLUDING ORAL CAVITY), BREAST, "
-    "G.U. TRACT, MUSCULO-SKELETAL SYSTEM, PAST HISTORY, FAMILY HISTORY. "
-    "The label '(Circle If Positive)' at the top tells you the rule: "
-    "a doctor physically draws a circle around any symptom that applies to "
-    "this patient. Your job:\n"
-    "  STEP 1 — Look at each section heading.\n"
-    "  STEP 2 — Scan ONLY for words/phrases that have a visible drawn circle "
-    "around them on the page. Ignore all other printed text in that section.\n"
-    "  STEP 3 — Output ONLY:\n"
-    "      GENERAL :\n"
-    "      G.I. TRACT :\n"
-    "      ENT (INCLUDING ORAL CAVITY) :\n"
-    "      BREAST :\n"
-    "      G.U. TRACT :\n"
-    "      MUSCULO-SKELETAL SYSTEM :\n"
-    "      PAST HISTORY :\n"
-    "      FAMILY HISTORY :\n"
-    "  After each heading colon, write ONLY the circled words. If nothing "
-    "is circled in that section → leave blank (write nothing after the colon). "
-    "Example if 'Fatigue' and 'Weight loss' are circled under GENERAL:\n"
-    "      GENERAL : Fatigue, Weight loss\n"
-    "  Example if nothing is circled under G.I. TRACT:\n"
-    "      G.I. TRACT :\n"
-    "  NEVER copy the full printed symptom list. NEVER add '(none circled)' "
-    "or any annotation — just leave blank if nothing is circled.\n"
-    "- CIRCLED SYMBOLS — standard medical notation inside circles:\n"
-    "  A circle drawn around '+' means positive → write as (+)\n"
-    "  A circle drawn around '-' means negative → write as (-)\n"
-    "  A circle drawn around 'L' means left side → write as (L)\n"
-    "  A circle drawn around 'R' means right side → write as (R)\n"
-    "  Always describe what is INSIDE the circle. Example outputs:\n"
-    "    Pallor - (+)    means Pallor is positive\n"
-    "    Icterus - (-)   means Icterus is negative\n"
-    "    Nodes - (+) ALN means Nodes positive, axillary lymph nodes\n"
-    "  NEVER output '@' or any other substitute. NEVER just say 'circle' — "
-    "always say what is inside it: (+), (-), (L), or (R).\n"
-    "- NUMBERS WITH SLASHES (hospital numbers, dates, registration numbers): "
-    "read every character individually and preserve slash separators exactly. "
-    "A hospital number like '14179/26' has two parts: '14179' then '/' then '26'. "
-    "Output it as '14179/26'. NEVER merge the digits — '1417926' or '1417928' "
-    "are WRONG. The slash '/' is a separator, not a digit. If you see digits, "
-    "a slash, then more digits, always preserve that exact format.\n"
-    "- TNM STAGING GRIDS AND STAGE TABLES: many oncology forms have a printed "
-    "staging table with columns STAGE (I, II, III, IV) and rows T, N, M. "
-    "These are filled in by the doctor circling or writing a value. "
-    "RULE: output ONLY the values that are actually marked/written/circled. "
-    "If the grid is blank (nothing written or circled in any cell) → output:\n"
-    "    STAGE : (blank)\n"
-    "  NEVER output the printed row/column labels (I II III IV T N M) as if "
-    "they were values. The printed grid structure is just a template — only "
-    "filled cells are data. Example if T2, N0, M0 are marked:\n"
-    "    STAGE : T2, N0, M0\n"
-    "- CLINIC/PRIVATE PRESCRIPTION DOCUMENTS: some documents are private "
-    "clinic prescriptions (not hospital forms). These typically have:\n"
-    "  * A HEADER with clinic name, doctor name, qualifications, address, "
-    "    phone numbers — extract as a table with two columns: label | value.\n"
-    "  * A PATIENT SECTION with name, age/sex, date, token number — table.\n"
-    "  * BODY: entirely handwritten consultation notes — extract as plain "
-    "    sentences in the order they appear, one per line. Do NOT force "
-    "    them into label:value format. Just write what is written.\n"
-    "  * RIGHT SIDE: vitals column (Wt, BMI, BP, DM, HTN, Thyroid, Cardiac) "
-    "    — extract as label : value pairs.\n"
-    "  * INVESTIGATIONS/ORDERS: numbered list — extract as numbered list.\n"
-    "  Example output for a clinic prescription:\n"
-    "    [CLINIC HEADER]\n"
-    "    Clinic : Sarthaka Arogya Chikitsa Kendra\n"
-    "    Doctor : Dr. B.K. Suresh, MBBS, DGO, MS(Surg), FICS, FAIS\n"
-    "    Address : No.1320, 2nd Cross, Sahakaranagara...\n"
-    "    [PATIENT]\n"
-    "    Name : Meena w/o Devaraju    Age/Sex : 45Y/F    Date : 26 Feb 2026\n"
-    "    [NOTES]\n"
-    "    c/o burning Rt breast x swelling — 6 months\n"
-    "    Referred by Dr Singhu for ECOG - 15 days back\n"
-    "    O/E: Firm induration Lt breast lower quadrant\n"
-    "    [VITALS]\n"
-    "    Wt : 55 kg    BMI : 23    BP : 130/80 mmHg\n"
-    "    DM : -    HTN : -    Thyroid : -\n"
-    "    [INVESTIGATIONS]\n"
-    "    CBC, RBS, Blood for HIV, TFT, Urine(R), Blood Urea, Sr Creatinine\n"
-    "    FNAc + CBP\n"
-    "- TWO-COLUMN PROGRESS NOTE LAYOUT: many Doctor's Order / progress-note "
-    "forms have a vertical printed or handwritten dividing line splitting "
-    "the body into a LEFT column (date in the far-left margin, then the "
-    "clinical note — complaints, O/E findings, diagnosis, stage, lab "
-    "requests) and a RIGHT column (medicines, doses, instructions, "
-    "follow-up). EACH dated entry must be transcribed as ONE block, reading "
-    "LEFT then RIGHT, with all content merged in reading order:\n"
-    "    Date : <date>\n"
-    "      Notes : <all left-column lines for that entry>\n"
-    "      Orders : <all right-column lines for that entry>\n"
-    "  NEVER skip the right column — it contains the prescriptions. "
-    "NEVER output [LEFT] or [RIGHT] markers in the text — those are "
-    "internal labels only. If there is NO dividing line, treat everything "
-    "as a single column.\n"
-    "- FORM-TABLE SECTIONS: some forms (e.g. Medical Case Record) have "
-    "sections that are structured as a two-column table: the LEFT cell "
-    "contains a printed label (e.g. COMPLAINTS AND DURATION, HISTORY OF "
-    "PRESENT ILLNESS, PAST HISTORY, FAMILY HISTORY) and the RIGHT cell "
-    "contains handwritten answers. Render these as:\n"
-    "    COMPLAINTS AND DURATION : <handwritten text>\n"
-    "    HISTORY OF PRESENT ILLNESS : <handwritten text>\n"
-    "    PAST HISTORY : <handwritten text>\n"
-    "    FAMILY HISTORY : <handwritten text>\n"
-    "  The LEFT cell (printed label) is NOT handwritten — write it in plain "
-    "uppercase. The RIGHT cell value IS handwritten.\n"
-    "- Attach each handwritten note, arrow or annotation to the field or "
-    "diagram it belongs to, on an indented line right below it, prefixed "
-    "'(handwritten)'. Example: '(handwritten) Pallor + -> arrow to neck of "
-    "body diagram'.\n"
-    "- GROUPED ANNOTATIONS: forms often have ONE handwritten value next to a "
-    "handwritten vertical line, brace or bracket that SPANS SEVERAL printed "
-    "fields (e.g. 'ND' written beside a line covering three rows). The value "
-    "IS the answer for EVERY field the line spans: write it as each spanned "
-    "field's value — 'Label : <value>' with '(handwritten)' noted — and "
-    "NEVER leave a spanned field as '(blank)'. Worked example — 'NO' beside "
-    "a line spanning three rows:\n"
-    "    Paranasal Sinuses : NO (handwritten, shared)\n"
-    "    Thyroid : NO (handwritten, shared)\n"
-    "    Chest, Spine : NO (handwritten, shared)\n"
-    "  Judge the line's extent carefully: it starts level with the FIRST "
-    "field of the group and ends level with the LAST; if an adjacent field "
-    "in the same section would otherwise be blank and the line visually "
-    "reaches its row, include it in the group.\n"
-    "- BUT sharing applies ONLY when a drawn line/brace exists. A handwritten "
-    "value with NO spanning line belongs to EXACTLY ONE field — the one it is "
-    "written on or aligned with. NEVER copy it to a neighbouring or "
-    "similar-looking field; those stay '(blank)'. Example: '2' written "
-    "before 'Cms below Lt' means only 'Cms below Lt : 2' — the similar "
-    "field 'Cms below Rt' above it stays '(blank)'.\n"
-    "- SHORT HANDWRITTEN VALUES (e.g. 'ND' vs 'NO', 'NAD', '+/-'): both 'ND' "
-    "(not done) and 'NO' are common on examination forms, so context cannot "
-    "decide — only the strokes can. Zoom into the letter shapes: a "
-    "handwritten 'D' has a straight vertical stem on the left with the bowl "
-    "joining it at top and bottom; an 'O' is a closed round loop with no "
-    "stem. If the second letter shows any straight vertical stroke, read "
-    "'ND'; if it is a plain round loop, read 'NO'. Decide letter by letter, "
-    "and append (?) only when the strokes are genuinely undecidable.\n"
-    "- Stamps: one line '[STAMP: <text of the stamp>]'. Signatures: "
-    "'[Signature: <name or illegible>]'. Diagrams/figures: one line "
-    "'[DIAGRAM: <what it shows + any markings on it>]'.\n\n"
-    "CONTENT RULES:\n"
-    "- Transcribe each medicine line as written, then expand medical "
-    "shorthand in parentheses. Examples: '1-0-1' → (morning and night), "
-    "'TDS' → (three times a day), 'BD' → (twice a day), 'OD' → (once a day), "
-    "'HS' → (at bedtime), 'SOS' → (when needed), 'PO' → (by mouth), "
-    "'a.c.' → (before food), 'p.c.' → (after food).\n"
-    "- ZERO SKIPPING: every word, every number, every abbreviation, every "
-    "symbol visible on the page MUST appear in the output. Even faint, "
-    "crossed-out or partially obscured text must be included — mark faint "
-    "text with (faint) and crossed-out text with (struck). Never silently "
-    "omit anything.\n"
-    "- NEVER USE [illegible]. This word is FORBIDDEN. No matter how bad the "
-    "handwriting, you MUST output your best guess for every word. Read "
-    "stroke by stroke — identify each letter, pick the most likely "
-    "character, and write the full word. If you are not certain, append (?) "
-    "to that word, e.g. 'Gleevec(?)', 'Imatinib(?)', 'Nilotinib(?)'. "
-    "A single (?) marker is enough — never refuse to guess. The human "
-    "reviewer will correct any wrong guesses; a blank or [illegible] "
-    "is never correctable and is always wrong.\n"
-    "- MEDICAL CONTEXT GUESSING: use the diagnosis, drug class, "
-    "abbreviation patterns and surrounding words to narrow down ambiguous "
-    "letters. Common oncology drugs: Imatinib, Nilotinib, Dasatinib, "
-    "Hydroxyurea, Gleevec, Tasigna. Common abbreviations: CBC, BCR-ABL, "
-    "CML, CP, MMR, CMR, ECOG, OD, BD, TDS, NAD, ND, R/A, c/o, O/E, H/O, "
-    "adv, Tab, Cap, Inj. When a word could match a known drug or "
-    "abbreviation, prefer that reading.\n"
-    "- Medicine names: always give a reading, mark uncertain with (?). "
-    "Never omit a medicine line because it is hard to read.\n"
-    "- Do not summarize, do not skip anything, do not add commentary. "
-    "Output only the reconstructed form."
+    "You are an expert medical document digitizer. Extract the COMPLETE content "
+    "of this single page image exactly as it appears — top to bottom, left to right.\n\n"
+
+    "OUTPUT FORMAT:\n"
+    "1. PRINTED STRUCTURED SECTIONS (institute header, patient details, form fields):\n"
+    "   Reproduce using 'Label : Value' format. Group related fields on one line "
+    "   when printed side by side. Use UPPERCASE for printed section headings.\n\n"
+
+    "2. TABLES: If the page contains a table (e.g. haematology report, investigation "
+    "   results, TNM staging grid), reproduce it as an aligned plain-text table "
+    "   with columns separated by | and rows on separate lines. Example:\n"
+    "   Test Name          | Result       | Reference Range\n"
+    "   Haemoglobin        | 12.8 gms%    | 11.0 - 14.0 gms%\n\n"
+
+    "3. PARAGRAPHS / UNSTRUCTURED TEXT (clinic notes, follow-up notes): "
+    "   Output each sentence or note on its own line exactly as written.\n\n"
+
+    "4. CIRCLE-IF-POSITIVE CHECKLISTS: Some Surgical Case Record / Medical Case "
+    "   Record forms have a left column labeled '(Circle If Positive)' with printed "
+    "   symptom lists under headings: GENERAL, G.I. TRACT, ENT (INCLUDING ORAL CAVITY), "
+    "   BREAST, G.U. TRACT, MUSCULO-SKELETAL SYSTEM, PAST HISTORY, FAMILY HISTORY.\n"
+    "   Rule: Output the heading, then list ALL words from that section EXACTLY as "
+    "   printed. For each word or phrase, look carefully — if the doctor has drawn a "
+    "   circle around it, mark it with (circled) immediately after. If not circled, "
+    "   just write it as-is. Example output:\n"
+    "     GENERAL : Fatigue (circled), weight loss, Chills, Unexplained fever\n"
+    "     G.I. TRACT : Anorexia, Indigestion, Dysphagia, Dyspepsia (circled), "
+    "       Vomiting, Haematesis, Colic, Jaundice, Constipation, Altered bowel habit, "
+    "       Diarrhoea, Dysentery, Bleeding per Rectum, Dyschezia\n"
+    "   If a word is NOT circled, write it without any marker.\n"
+    "   If nothing in a section is circled, all words appear without markers.\n\n"
+
+    "5. CIRCLED SYMBOLS in examination/vitals:\n"
+    "   Circle with '+' inside → (+)  [positive finding]\n"
+    "   Circle with '-' inside → (-)  [negative finding]\n"
+    "   Circle with 'L' inside → (L)  [left side]\n"
+    "   Circle with 'R' inside → (R)  [right side]\n"
+    "   Example: Pallor - (+),  Icterus - (-),  Nodes - (+) ALN\n\n"
+
+    "6. TNM/STAGE GRID: Output only marked/filled values. If the grid is empty → "
+    "   write: STAGE : (blank)\n"
+    "   If values are filled: STAGE : T2, N0, M0\n\n"
+
+    "7. HOSPITAL/REGISTRATION NUMBERS WITH SLASHES: Preserve exactly as written. "
+    "   '14179/26' stays '14179/26'. Never merge digits.\n\n"
+
+    "8. THIS PAGE ONLY: Extract ONLY what is physically visible in this image. "
+    "   Do NOT add content from other pages or from memory. Do NOT hallucinate "
+    "   diagnoses, drug names, or doctor names not visible in this image.\n\n"
+
+    "9. GUESS ALL HANDWRITING: Never write [illegible]. Always give your best "
+    "   reading and mark uncertain words with (?). Every piece of visible text "
+    "   must appear in the output.\n\n"
+
+    "10. STAMPS, SIGNATURES, DIAGRAMS:\n"
+    "    Stamps → [STAMP: text]\n"
+    "    Signatures → [Signature: name or illegible]\n"
+    "    Diagrams → [DIAGRAM: description and any markings on it]\n"
 )
 
 _READ_USER = (
-    "You are looking at ONE single page image — page {page}. "
-    "Extract ONLY what is visible in THIS image. "
-    "Do NOT include any content from other pages of the document. "
-    "Reconstruct this page as a structured form template following the format rules: "
-    "headings, 'Label : value' fields, grouped side-by-side fields, marked circled "
-    "options, and handwritten annotations attached to their fields. "
-    "Expand medical shorthand in parentheses. "
-    "EXTRACT EVERY WORD visible in THIS image — guess uncertain "
-    "words with (?) but NEVER write [illegible]. Leave nothing out."
+    "Extract the complete content of page {page} from this single image. "
+    "Output everything visible — top to bottom, left to right. "
+    "Tables as tables, paragraphs as lines, form fields as Label : Value. "
+    "For Circle-if-Positive checklists: list all printed words and mark circled ones with (circled). "
+    "Never skip any text. Never write [illegible] — guess with (?) instead."
 )
+
 
 _LAYOUT_SYSTEM = (
     "You are an expert medical document reader assisting a licensed "
@@ -552,409 +411,6 @@ class ExtractorError(RuntimeError):
     """Raised when extraction cannot proceed; message is user-displayable."""
 
 
-# ── Post-processing: fix model output regardless of prompt compliance ──────
-
-# Sections whose printed content must be stripped after extraction.
-# Maps the heading pattern to the section name used in output.
-_CIRCLE_IF_POSITIVE_SECTIONS = [
-    ("GENERAL",                     r"GENERAL\s*:"),
-    ("G.I. TRACT",                  r"G\.?I\.?\s*TRACT\s*:"),
-    ("ENT (INCLUDING ORAL CAVITY)", r"ENT\s*[\(\[]?INCLUDING\s*ORAL\s*CAVITY[\)\]]?\s*:"),
-    ("BREAST",                      r"BREAST\s*:"),
-    ("G.U. TRACT",                  r"G\.?U\.?\s*TRACT\s*:"),
-    ("MUSCULO-SKELETAL SYSTEM",     r"MUSCULO\s*[-–]?\s*SKELETAL\s*(?:SY[SA]T[EA]M|SYSTEM)?\s*:"),
-    ("PAST HISTORY",                r"PAST\s*HISTORY\s*:"),
-    ("FAMILY HISTORY",              r"FAMILY\s*HISTORY\s*:"),
-]
-
-# Words that mark the END of a checklist section (start of the right-column content).
-# NOTE: does NOT include PAST HISTORY or FAMILY HISTORY — those are themselves
-# checklist sections handled by the outer loop, not right-column markers.
-_RIGHT_COLUMN_MARKERS = re.compile(
-    r"^(COMPLAINTS\s*AND\s*DURATION|HISTORY\s*OF\s*PRESENT\s*ILLNESS|"
-    r"GENERAL\s*EXAMINATION|EXAMINATION\s*:)",
-    re.IGNORECASE,
-)
-
-
-def _fix_circled_symbols(text: str) -> str:
-    """
-    Normalize circled symbol notation in non-section lines:
-    - '@' → '(?)'
-    - 'Word - (circled)' → 'Word - (+)'  (medical positive finding)
-    - Bare '(circled)' not attached to a word → removed
-    - '(none circled)' → removed
-    - '(handwritten)' → removed
-    """
-    # @ → (?)
-    text = re.sub(r"@\s+", "(?) ", text)
-    text = re.sub(r"@(?=[A-Za-z])", "(?)", text)
-    text = re.sub(r"@$", "(?)", text, flags=re.MULTILINE)
-    # "Word - (circled)" or "Word (circled)" in examination context → "(+)"
-    # This handles Pallor - (circled) → Pallor - (+)
-    text = re.sub(r"\s*-\s*\(circled\)", " - (+)", text, flags=re.IGNORECASE)
-    # Any remaining bare (circled) → (+) in medical context
-    text = re.sub(r"\s*\(circled\)", " (+)", text, flags=re.IGNORECASE)
-    # Cleanup
-    text = re.sub(r"\s*\(none\s*circled\)\s*", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*\(handwritten\)\s*", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"  +", " ", text)
-    return text
-
-
-def _clean_checklist_sections(text: str) -> str:
-    """
-    Post-process model raw text:
-    1. Detect if this page actually contains a Circle-if-Positive checklist.
-       If not (clinic prescription, follow-up note, etc.) — remove ALL
-       hallucinated checklist section lines entirely.
-    2. If the page does have a checklist, strip full printed symptom lists
-       and keep only (circled) items.
-    3. Fix circled symbol notation.
-    """
-    # ── Step 0: Detect if this page actually has a checklist ──────────────
-    # The Surgical Case Record / Medical Case Record has a printed
-    # "(Circle If Positive)" label and known section headings together.
-    # A page without this label but with the section headings = hallucination.
-    has_circle_if_positive_label = bool(re.search(
-        r"Circle\s*If\s*Positive|Circle\s*if\s*Positive",
-        text, re.IGNORECASE,
-    ))
-    # Count how many checklist section headings appear in the text
-    checklist_heading_count = sum(
-        1 for _, pat in _CIRCLE_IF_POSITIVE_SECTIONS
-        if re.search(pat, text, re.IGNORECASE)
-    )
-    # Known markers that ONLY appear on clinic/follow-up pages, NOT on
-    # the Surgical Case Record that has the checklist.
-    # Also detect haematology/lab reports which never have checklists.
-    clinic_markers = bool(re.search(
-        r"KPME\s*Reg|Centre\s*for\s*Advanced|Sarthaka|Sarvodaya|Sudhesha|"
-        r"FOLLOW[\s\-]*UP\s*NOTES?|"
-        r"Dr\.\s*[A-Z][\w\.]*\s*Suresh|"
-        r"C\s*-\s*\d+\s*/\s*\d{4}|"          # case number format
-        r"HAEMATOLOGY\s*REPORT|HAEMOGRAM|"    # lab reports
-        r"Platelet\s*Count|Haemoglobin|"      # CBC values
-        r"Reference\s*Range|Verified\s*By|"   # lab report markers
-        r"End\s*of\s*Report|"
-        r"Age/Sex\s*:\s*\d+Y?/[MF]|"          # clinic format (not hospital)
-        r"Ref\s*\.\s*Fee|"                     # clinic fee
-        r"BMI\s*:\s*\d|"                       # clinic vitals inline
-        r"4\s*pm\s*to\s*6\s*pm|"              # clinic hours
-        r"Laparoscopy\s*&\s*Ultrasound",       # clinic speciality
-        text, re.IGNORECASE,
-    ))
-
-    # If page has clinic markers OR lacks the "Circle If Positive" label
-    # AND has checklist headings → they're hallucinated, strip them all
-    page_has_real_checklist = has_circle_if_positive_label or (
-        checklist_heading_count >= 3 and not clinic_markers
-    )
-
-    if not page_has_real_checklist and checklist_heading_count > 0:
-        # Remove all lines that are checklist section headings or their
-        # continuation lines
-        sec_patterns_rx = [
-            re.compile(r"^\s*" + pat, re.IGNORECASE)
-            for _, pat in _CIRCLE_IF_POSITIVE_SECTIONS
-        ]
-        lines = text.splitlines(keepends=True)
-        output = []
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.rstrip("\n").strip()
-            is_checklist = any(rx.match(stripped) for rx in sec_patterns_rx)
-            if is_checklist:
-                # Skip this heading and any blank continuation
-                i += 1
-                while i < len(lines):
-                    next_s = lines[i].rstrip("\n").strip()
-                    if any(rx.match(next_s) for rx in sec_patterns_rx):
-                        break
-                    if next_s and not re.match(r"^\s*$", next_s):
-                        # Non-blank continuation — check if it looks like
-                        # a symptom list (if so, skip it too)
-                        if not re.search(
-                            r"COMPLAINTS|HISTORY\s*OF\s*PRESENT|EXAMINATION|"
-                            r"INVESTIGATIONS|PROPOSED|DIAGNOSIS|STAGE|[Cc]/[Oo]",
-                            next_s, re.IGNORECASE
-                        ):
-                            i += 1
-                            continue
-                    break
-                continue
-            output.append(line)
-            i += 1
-        text = "".join(output)
-        # Still fix symbol notation
-        text = _fix_circled_symbols(text)
-        text = _clean_stage_grids(text)
-        return text
-
-    # ── Step 1: Page has real checklist — strip symptom lists ─────────────
-    sec_patterns = [
-        (name, re.compile(r"^\s*" + pat, re.IGNORECASE))
-        for name, pat in _CIRCLE_IF_POSITIVE_SECTIONS
-    ]
-
-    lines = text.splitlines(keepends=True)
-    output = []
-    i = 0
-
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.rstrip("\n").strip()
-
-        matched_name = None
-        for name, rx in sec_patterns:
-            if rx.match(stripped):
-                matched_name = name
-                break
-
-        if matched_name is None:
-            output.append(line)
-            i += 1
-            continue
-
-        # Collect section content
-        section_text = stripped
-        i += 1
-        while i < len(lines):
-            next_stripped = lines[i].rstrip("\n").strip()
-            is_section = any(rx.match(next_stripped) for _, rx in sec_patterns)
-            is_right = bool(_RIGHT_COLUMN_MARKERS.match(next_stripped))
-            if is_section or is_right:
-                break
-            if next_stripped:
-                section_text += " " + next_stripped
-            i += 1
-
-        colon_pos = section_text.find(":")
-        content = section_text[colon_pos + 1:] if colon_pos != -1 else section_text
-
-        parts = re.split(r"\(circled\)", content, flags=re.IGNORECASE)
-        items = []
-        for part in parts[:-1]:
-            candidate = part.rstrip(", \t")
-            comma_parts = [p.strip() for p in candidate.split(",") if p.strip()]
-            if comma_parts:
-                item = comma_parts[-1].strip()
-                if item and len(item) > 1 and ":" not in item:
-                    items.append(item)
-
-        circled_str = ", ".join(items) if items else ""
-        output.append(f"{matched_name} : {circled_str}\n")
-
-    result = "".join(output)
-    result = _fix_circled_symbols(result)
-    result = _clean_stage_grids(result)
-    result = _dedup_checklist_sections(result)
-    # Final pass: if ALL checklist sections are blank on this page,
-    # remove them entirely — they're either hallucinated or all-negative
-    # and add no value to the output.
-    result = _remove_all_blank_checklists(result)
-    return result
-
-
-def _remove_all_blank_checklists(text: str) -> str:
-    """
-    If every Circle-if-Positive section heading on this page is blank,
-    remove all of them entirely — they're hallucinated on non-checklist pages.
-    EXCEPTION: if the page has the "(Circle If Positive)" label, it's a real
-    Surgical Case Record and we keep the blank sections (all-negative is valid).
-    """
-    # Keep sections on pages that explicitly have the checklist label
-    if re.search(r"Circle\s*If\s*Positive", text, re.IGNORECASE):
-        return text
-
-    lines = text.splitlines(keepends=True)
-    checklist_line_indices = []
-    has_content = False
-
-    for idx, line in enumerate(lines):
-        stripped = line.rstrip("\n").strip()
-        for name, _ in _CIRCLE_IF_POSITIVE_SECTIONS:
-            name_escaped = re.escape(name)
-            if re.match(r"^\s*" + name_escaped + r"\s*:", stripped, re.IGNORECASE):
-                checklist_line_indices.append(idx)
-                m = re.match(r"^\s*" + name_escaped + r"\s*:\s*(\S.*)", stripped, re.IGNORECASE)
-                if m:
-                    has_content = True
-                break
-
-    # Remove only if: ≥3 blank sections, no content, and no checklist label
-    if not has_content and len(checklist_line_indices) >= 3:
-        remove_set = set(checklist_line_indices)
-        return "".join(line for idx, line in enumerate(lines) if idx not in remove_set)
-
-    return text
-
-
-def _dedup_checklist_sections(text: str) -> str:
-    """
-    Remove duplicate Circle-if-Positive section headings.
-    The 32B model sometimes outputs the left column sections twice —
-    once blank, once with content. Keep only the FIRST occurrence of each.
-    Also removes spurious STAGE entries that duplicate earlier ones.
-    """
-    sec_patterns = [
-        (name, re.compile(r"^\s*" + pat, re.IGNORECASE))
-        for name, pat in _CIRCLE_IF_POSITIVE_SECTIONS
-    ]
-    seen_sections = set()
-    lines = text.splitlines(keepends=True)
-    output = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.rstrip("\n").strip()
-        matched_name = None
-        for name, rx in sec_patterns:
-            if rx.match(stripped):
-                matched_name = name
-                break
-        if matched_name is not None:
-            if matched_name in seen_sections:
-                # Skip this duplicate section (and any continuation lines)
-                i += 1
-                while i < len(lines):
-                    next_s = lines[i].rstrip("\n").strip()
-                    is_sec = any(rx.match(next_s) for _, rx in sec_patterns)
-                    is_right = bool(_RIGHT_COLUMN_MARKERS.match(next_s))
-                    if is_sec or is_right or not next_s:
-                        break
-                    i += 1
-                continue
-            seen_sections.add(matched_name)
-        output.append(line)
-        i += 1
-    return "".join(output)
-
-
-def _clean_stage_grids(text: str) -> str:
-    """
-    Post-process: strip TNM staging grid content when nothing was filled in.
-    The model often copies 'STAGE I II III IV' and 'T N M' from the grid.
-    """
-    lines = text.splitlines(keepends=True)
-    output = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.rstrip("\n").strip()
-
-        # Detect a STAGE line
-        stage_m = re.match(r"^(STAGE)\s*[:\-]?\s*(.*)", stripped, re.IGNORECASE)
-        if stage_m:
-            stage_content = stage_m.group(2).strip()
-            # Collect any continuation lines that look like TNM grid rows
-            # (lines containing only I/II/III/IV/T/N/M and whitespace)
-            j = i + 1
-            while j < len(lines):
-                next_s = lines[j].rstrip("\n").strip()
-                if re.match(r"^[IViv\s\d]+[TNMtnm\s]*$", next_s) or \
-                   re.match(r"^[TNMtnm]\s*$", next_s):
-                    stage_content += " " + next_s
-                    j += 1
-                else:
-                    break
-
-            # Check if all content is just printed labels (I II III IV T N M)
-            # with no actual values (T2, N1, M0, Early, Late, numbers ≥2 digits)
-            has_value = bool(re.search(
-                r"T[0-4x]|N[0-3x]|M[01x]|Early|Late|"
-                r"\b[1-9][0-9]+\b|Stage\s+[IViv]+\b",
-                stage_content, re.IGNORECASE,
-            ))
-            label_only = re.sub(
-                r"\b(I{1,3}V?|IV|T|N|M)\b", "", stage_content
-            )
-            label_only = re.sub(r"[\s\-\:]+", "", label_only).strip()
-
-            if not has_value and not label_only:
-                output.append("STAGE : (blank)\n")
-            else:
-                output.append(f"STAGE : {stage_content}\n")
-            i = j
-            continue
-
-        output.append(line)
-        i += 1
-    return "".join(output)
-
-
-def _clean_checklist_html(html: str) -> str:
-    """
-    Strip the full printed symptom lists from Circle-if-Positive sections
-    in the layout HTML. After the section heading element, remove all child
-    text nodes / spans that contain the printed symptom list.
-
-    Strategy: for each known checklist section heading found in the HTML,
-    replace everything between that heading and the next heading (or
-    right-column marker) with just the heading element.
-
-    This is less precise than the text cleaner but good enough since the
-    model typically puts the whole section as a flat block.
-    """
-    if not html:
-        return html
-
-    # Build a combined regex of all section heading patterns as they appear in HTML.
-    # The model wraps headings in bold, <div>, <p>, or <span> tags.
-    heading_text_patterns = [
-        r"GENERAL",
-        r"G\.?I\.?\s*TRACT",
-        r"ENT\s*[\(\[]?INCLUDING\s*ORAL\s*CAVITY[\)\]]?",
-        r"BREAST",
-        r"G\.?U\.?\s*TRACT",
-        r"MUSCULO\s*[-\u2013]?\s*SKELETAL\s*(?:SY[SA]T[EA]M|SYSTEM)?",
-        r"PAST\s*HISTORY",
-        r"FAMILY\s*HISTORY",
-    ]
-
-    # Known symptom list words that prove the model copied the full list.
-    # If we find these after a checklist heading in the HTML, strip that block.
-    symptom_list_words = re.compile(
-        r"Anorexia|Indigestion|Dysphagia|Haematuria|Epistaxis|Nocturia|"
-        r"Sore\s*throat|Constipation|Tuberculosis|Trauma|Operations|"
-        r"Haematesis|Ulceration|Bleeding\s*per\s*Rectum|Fractures|"
-        r"Salivation|Hoarseness|Anosmia|Deafness|Peripheral|Vascular|"
-        r"Nipple|Dysuria|Vomit|Colic|Jaundice|Dyschezia|Swelling,|"
-        r"weight\s*loss|Chills|Unexplained\s*fever|Fatigue",
-        re.IGNORECASE,
-    )
-
-    for pat in heading_text_patterns:
-        # Find heading tag containing this text, followed by symptom list content.
-        # Match: <tag ...>...HEADING...</tag> then content with symptom words
-        # up to the next known heading or right-column section.
-        section_rx = re.compile(
-            r"(<(?:b|strong|div|p|span|td|h[1-6])\b[^>]*>"
-            r"[^<]*" + pat + r"[^<]*</(?:b|strong|div|p|span|td|h[1-6])>)"
-            r"((?:(?!(?:GENERAL|G\.?I\.?\s*TRACT|ENT|BREAST|G\.?U\.?\s*TRACT|"
-            r"MUSCULO|COMPLAINTS\s*AND\s*DURATION|HISTORY\s*OF\s*PRESENT|"
-            r"GENERAL\s*EXAMINATION).){0,3000}?))"
-            r"(?=<(?:b|strong|div|p|span|td|h[1-6])\b[^>]*>"
-            r"(?:GENERAL|G\.?I\.?\s*TRACT|ENT|BREAST|G\.?U\.?\s*TRACT|"
-            r"MUSCULO|COMPLAINTS\s*AND\s*DURATION|HISTORY\s*OF\s*PRESENT|"
-            r"GENERAL\s*EXAMINATION|PAST\s*HISTORY|FAMILY\s*HISTORY))",
-            re.IGNORECASE | re.DOTALL,
-        )
-
-        def _replace_if_symptom_list(m, _spx=symptom_list_words):
-            heading_tag = m.group(1)
-            content = m.group(2)
-            # Only strip if the content contains known symptom list words
-            if _spx.search(content):
-                return heading_tag + "\n"
-            return m.group(0)
-
-        html = section_rx.sub(_replace_if_symptom_list, html)
-
-    return html
-
-
 def _strip_fences(text: str) -> str:
     """Remove a wrapping ```lang ... ``` fence if the model added one."""
     text = text.strip()
@@ -1085,74 +541,38 @@ def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
                   _crop_tag, fragment, flags=re.IGNORECASE)
 
 
-# Reinforcement appended AFTER the long shared prompts.
-# Written to work well with both 7B and 32B models.
+# Reinforcement appended AFTER the main system prompt.
+# These are the last instructions the model sees — highest recency weight.
 _LOCAL_RULES = (
-    "\n\nCRITICAL RULES — follow ALL of these exactly:\n\n"
-    "RULE 1 — LETTERHEAD FIRST:\n"
-    "Start with the printed institute name, address, and form title from "
-    "the very top of the image. Never skip it.\n\n"
-    "RULE 2 — NO HANDWRITING FONT (hw class):\n"
-    "All text — whether printed or handwritten — output in plain text. "
-    "Do NOT use the hw class or any special styling for handwritten content.\n\n"
-    "RULE 3 — TWO-COLUMN LAYOUT: capture BOTH columns. Do NOT output [LEFT]/[RIGHT].\n\n"
-    "RULE 4 — CIRCLE-IF-POSITIVE CHECKLISTS (MOST IMPORTANT):\n"
-    "The left column has printed symptom lists under headings: GENERAL, "
-    "G.I. TRACT, ENT (INCLUDING ORAL CAVITY), BREAST, G.U. TRACT, "
-    "MUSCULO-SKELETAL SYSTEM, PAST HISTORY, FAMILY HISTORY.\n"
-    "ONLY output these sections if they are PHYSICALLY PRINTED on the page "
-    "you are reading. If the page is a clinic prescription, follow-up note, "
-    "discharge summary, or any other document that does NOT have these "
-    "printed headings → do NOT output them at all.\n"
-    "For pages that DO have these headings: output heading + colon, "
-    "then ONLY the circled words. Nothing circled = blank after the colon.\n"
-    "CORRECT (Surgical Case Record page): GENERAL :\n"
-    "CORRECT (Clinic prescription page): do not output GENERAL at all\n"
-    "WRONG: outputting GENERAL/G.I.TRACT etc. on every page regardless\n\n"
-    "RULE 5 — CIRCLED SYMBOLS:\n"
-    "Circle with '+' inside → write (+)\n"
-    "Circle with '-' inside → write (-)\n"
-    "Circle with 'L' inside → write (L)\n"
-    "Circle with 'R' inside → write (R)\n"
-    "Examples: 'Pallor - (+)', 'Icterus - (-)', 'Nodes - (+) ALN'\n"
-    "NEVER write '@'. NEVER just say 'circle'.\n\n"
-    "RULE 6 — SLASHED NUMBERS:\n"
-    "Hospital No. '14179/26' keeps the slash. NEVER write '1417926'.\n\n"
-    "RULE 7 — TNM/STAGE GRID:\n"
-    "If nothing is written/circled in the Stage grid → output: STAGE : (blank)\n"
-    "Only output stage values that are actually marked (e.g. T2, N0, M0).\n\n"
-    "RULE 8 — NO [illegible]:\n"
-    "Always guess handwritten words. Mark uncertain with (?). "
-    "Never write [illegible].\n\n"
-    "RULE 9 — NO HALLUCINATION:\n"
-    "ONLY extract text that is physically visible in the image you are reading. "
-    "Do NOT invent, fabricate, or fill in content from memory or other pages. "
-    "If a field is blank or unreadable → write (blank) or (?). "
-    "Never write diagnoses, drug names, doctor names, or hospital names "
-    "that are not actually printed or written in THIS specific image.\n"
+    "\n\nFINAL REMINDERS — apply these to every page:\n\n"
+    "1. THIS PAGE ONLY: Extract only what is in this single image. "
+    "Never add content from other pages or from memory.\n\n"
+    "2. COMPLETE EXTRACTION: Read every pixel — top to bottom, left to right. "
+    "Do not skip any text, number, or symbol. Every visible item must appear.\n\n"
+    "3. CIRCLE-IF-POSITIVE CHECKLISTS: When you see a column headed "
+    "'(Circle If Positive)' with printed symptom lists under GENERAL, "
+    "G.I. TRACT, ENT, BREAST, G.U. TRACT, MUSCULO-SKELETAL, PAST HISTORY, "
+    "FAMILY HISTORY — list ALL words in each section. Mark each word that "
+    "has a drawn circle around it with (circled). Unmarked words have no marker.\n\n"
+    "4. CIRCLED SYMBOLS: (+) = circled plus, (-) = circled minus, "
+    "(L) = circled L, (R) = circled R. NEVER write '@'.\n\n"
+    "5. NUMBERS WITH SLASHES: '14179/26' stays '14179/26'. Never merge.\n\n"
+    "6. NO [illegible]: Guess every word. Mark uncertain with (?). "
+    "A wrong guess is correctable. A blank is not.\n\n"
+    "7. NO HALLUCINATION: Only output text that is physically visible "
+    "in this image. Never invent content.\n"
 )
 
-# Imperative commands appended to USER message — highest priority for the model.
+# Commands appended to the USER message — processed last before generation.
 _LOCAL_USER_RULES = (
-    "\n\nBEFORE WRITING, apply these rules:\n"
-    "1. FIRST: transcribe the printed letterhead and form title from the top.\n"
-    "2. PLAIN TEXT ONLY: no hw class anywhere. All text plain.\n"
-    "3. CHECKLISTS (GENERAL / G.I. TRACT / ENT / BREAST / G.U. TRACT / "
-    "MUSCULO-SKELETAL / PAST HISTORY / FAMILY HISTORY): "
-    "ONLY output these sections if they are PHYSICALLY PRINTED on THIS page. "
-    "If this page is a clinic prescription, follow-up note, investigation form, "
-    "or any page that does NOT have these printed headings visible → "
-    "do NOT output them at all. "
-    "If present on this page: heading + colon, then ONLY circled words. "
-    "Nothing circled = blank after colon. Each section ONCE only.\n"
-    "4. CIRCLED SYMBOLS: (+) = circled plus, (-) = circled minus, "
-    "(L) = circled L, (R) = circled R. NEVER write '@'.\n"
-    "5. HOSPITAL NO: preserve slash — '14179/26' not '1417926'.\n"
-    "6. STAGE GRID: if blank → 'STAGE : (blank)'. Only output marked values.\n"
-    "7. NO [illegible]: guess every word with (?).\n"
-    "8. NO HALLUCINATION: only write what you can physically see in THIS image. "
-    "Never invent diagnoses, drug names, doctor names, or any content "
-    "not visible in this specific image.\n"
+    "\n\nEXTRACT this page completely:\n"
+    "- Start with the letterhead/header at the very top.\n"
+    "- Follow the document structure: tables as tables, paragraphs as lines.\n"
+    "- For Circle-if-Positive sections: list ALL words, mark circled ones with (circled).\n"
+    "- Circled symbols: (+) (-) (L) (R). Never '@'.\n"
+    "- Slashed numbers: preserve slash exactly.\n"
+    "- No [illegible]: guess everything with (?).\n"
+    "- No hallucination: only what's visible in THIS image.\n"
 )
 
 
@@ -1496,9 +916,7 @@ def read_page(b64_image: str, page_num: int, mime: str = "image/jpeg") -> tuple:
             if text:
                 if layout:
                     layout = _unhw_letterhead(text, layout)
-                    # Post-process text: fix checklist sections and symbol notation
                     text = _clean_checklist_sections(text)
-                    # Post-process HTML: strip symptom lists from layout too
                     layout = _clean_checklist_html(layout)
                     return text, _sanitize_html(layout), None
                 # Combined call gave text but no layout section.
@@ -1657,3 +1075,4 @@ def extract(data: bytes, ext: str) -> tuple:
     }
     meta = {"engine": ENGINE_NAME, "source": "ollama-vision", "deployment": _MODEL}
     return pages, extras, meta
+

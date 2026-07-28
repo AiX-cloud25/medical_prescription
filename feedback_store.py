@@ -406,11 +406,9 @@ def save_raw_extraction(doc_hash: str, filename: str, pages: list) -> None:
     Persist the raw model extraction for every page of a document immediately
     after extraction, before any human correction is applied.
 
-    Stores TWO things:
-    1. raw_extractions — per-page text + layout HTML (always overwritten on re-run)
-    2. raw_corrections.original_text — the full combined text, saved ONCE on first
-       extraction and never overwritten (so human corrections can always be
-       compared against the original model output).
+    Stores ONLY in raw_extractions table (per-page text + layout HTML).
+    raw_corrections is NEVER touched here — it is only written when a human
+    explicitly saves a correction via the frontend /api/raw-feedback endpoint.
 
     pages: [{"page": int, "text": str, "layout_html": str|None, "layout_error": str|None}]
     Never raises — failures are logged so they cannot break the extract endpoint.
@@ -418,20 +416,11 @@ def save_raw_extraction(doc_hash: str, filename: str, pages: list) -> None:
     if not pages:
         return
 
-    # Build the full combined raw text (same format as raw_text in the API response)
-    if len(pages) == 1:
-        full_raw_text = pages[0].get("text") or ""
-    else:
-        full_raw_text = "\n\n".join(
-            f"--- Page {p.get('page', i+1)} ---\n{p.get('text') or ''}"
-            for i, p in enumerate(pages)
-        )
-
     s = _schema()
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            # ── 1. Per-page raw_extractions (always upsert) ──────────────
+            # Per-page raw_extractions — always upsert (refresh on every run)
             for p in pages:
                 page_num = p.get("page", 1)
                 raw_text = p.get("text") or ""
@@ -456,38 +445,6 @@ def save_raw_extraction(doc_hash: str, filename: str, pages: list) -> None:
                         (doc_hash, filename or None, page_num,
                          raw_text, layout_html, layout_error),
                     )
-
-            # ── 2. raw_corrections.original_text (only if no row yet) ────
-            # We INSERT the original_text only on first extraction. If a human
-            # correction row already exists, we leave it untouched — the human's
-            # corrected_text is preserved and the original_text was already set.
-            cur.execute(
-                f"""SELECT id FROM {s}.raw_corrections WHERE doc_hash = %s""",
-                (doc_hash,),
-            )
-            existing = cur.fetchone()
-            if existing is None:
-                # First time seeing this document — seed the original_text.
-                # corrected_text must be NOT NULL per schema, so we use the
-                # raw text as the initial corrected_text too. A human edit
-                # will overwrite corrected_text later.
-                cur.execute(
-                    f"""INSERT INTO {s}.raw_corrections
-                        (doc_hash, filename, original_text, corrected_text)
-                        VALUES (%s, %s, %s, %s)""",
-                    (doc_hash, filename or None, full_raw_text, full_raw_text),
-                )
-            else:
-                # Document already has a row — update original_text only if it
-                # was NULL (backfill for rows created before this logic existed).
-                cur.execute(
-                    f"""UPDATE {s}.raw_corrections
-                        SET original_text = COALESCE(original_text, %s),
-                            filename = COALESCE(filename, %s)
-                        WHERE doc_hash = %s""",
-                    (full_raw_text, filename or None, doc_hash),
-                )
-
         conn.commit()
     except Exception as e:
         print(f"[WARNING] save_raw_extraction DB error: {e}")
@@ -527,17 +484,14 @@ def get_raw_extraction(doc_hash: str) -> list:
 
 def save_raw_correction(doc_hash: str, filename: str, original_text: str, corrected_text: str) -> tuple:
     """
-    Upsert the corrected full raw text keyed by the document's SHA-256 hash
-    (re-uploading the same file replays this text), and mine word-level
-    diffs into the corrections table (kind='spelling') so the transcription
-    prompt learns for other documents. Returns (patch_pairs, learned_pairs):
-    patch_pairs update this document's layout, learned_pairs (long tokens
-    only) teach the prompts. Raises on DB error.
+    Called ONLY when a human explicitly saves a correction via the frontend.
+    Stores original_text (what the model produced) and corrected_text (what
+    the human fixed it to), then mines word-level diffs into the corrections
+    table so the transcription prompt learns for future documents.
+    Returns (patch_pairs, learned_pairs). Raises on DB error.
     """
     pairs = _word_diffs(original_text or "", corrected_text)
     learned = _learnable(pairs)
-    # Short ambiguous tokens (NO/ND) become "watch out" warnings, not
-    # substitutions; placeholder fill-ins are never learned at all.
     ambiguous = [
         (p, c) for p, c, _a in pairs
         if (p, c) not in learned and not _has_placeholder(p, c)
@@ -546,13 +500,10 @@ def save_raw_correction(doc_hash: str, filename: str, original_text: str, correc
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            # Update-then-insert upsert (SQL Server has no ON CONFLICT).
-            # original_text is seeded by save_raw_extraction on every run —
-            # COALESCE here is just a safety net for very old rows.
-            # corrected_text is always updated to the latest human edit.
+            # Upsert: update existing row or insert new one
             cur.execute(
                 f"""UPDATE {s}.raw_corrections
-                    SET filename = COALESCE(filename, %s),
+                    SET filename = %s,
                         original_text = COALESCE(original_text, %s),
                         corrected_text = %s,
                         created_at = SYSDATETIMEOFFSET()
