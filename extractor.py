@@ -872,13 +872,28 @@ def _generate_layout(b64_image: str, page_num: int, raw_text: str) -> tuple:
     Returns (layout_html, error_str|None).
     Falls back to a Python-generated HTML if the model keeps failing.
     """
-    layout_user = (
-        f"Convert this already-transcribed page {page_num} into an HTML layout fragment. "
-        "Use the image to determine what is printed vs handwritten, and to match the "
-        "visual structure. hw = pen ink only. Printed text = no hw class.\n\n"
-        f"TRANSCRIBED TEXT:\n{raw_text[:3000]}\n\n"
-        "Output the HTML fragment now. Start with an HTML tag."
-    )
+    layout_user = f"""Convert page {page_num} into a structured HTML layout.
+
+Requirements:
+1. Preserve the visual structure of the page.
+2. Keep section headings, tables, columns, form fields and lists.
+3. Use the image to distinguish:
+   - Printed text: normal HTML elements.
+   - Handwritten text: wrap in <span class="hw">...</span>
+4. Preserve the original reading order.
+5. Represent checklists faithfully.
+6. For '(Circle If Positive)' sections:
+   - Include every checklist item.
+   - If an item is visibly selected, append '(Circled)'.
+7. Do not invent content.
+8. Maintain spacing and grouping wherever possible.
+9. Output valid HTML only.
+
+TRANSCRIBED TEXT:
+{raw_text}
+
+Return only the HTML fragment.
+Start with an HTML tag."""
     last_err = None
     for attempt in range(3):
         try:
