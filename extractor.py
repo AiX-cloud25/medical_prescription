@@ -750,7 +750,45 @@ def _clean_checklist_sections(text: str) -> str:
     result = _fix_circled_symbols(result)
     result = _clean_stage_grids(result)
     result = _dedup_checklist_sections(result)
+    # Final pass: if ALL checklist sections are blank on this page,
+    # remove them entirely — they're either hallucinated or all-negative
+    # and add no value to the output.
+    result = _remove_all_blank_checklists(result)
     return result
+
+
+def _remove_all_blank_checklists(text: str) -> str:
+    """
+    If every Circle-if-Positive section heading on this page is blank,
+    remove all of them entirely — they're hallucinated on non-checklist pages.
+    EXCEPTION: if the page has the "(Circle If Positive)" label, it's a real
+    Surgical Case Record and we keep the blank sections (all-negative is valid).
+    """
+    # Keep sections on pages that explicitly have the checklist label
+    if re.search(r"Circle\s*If\s*Positive", text, re.IGNORECASE):
+        return text
+
+    lines = text.splitlines(keepends=True)
+    checklist_line_indices = []
+    has_content = False
+
+    for idx, line in enumerate(lines):
+        stripped = line.rstrip("\n").strip()
+        for name, _ in _CIRCLE_IF_POSITIVE_SECTIONS:
+            name_escaped = re.escape(name)
+            if re.match(r"^\s*" + name_escaped + r"\s*:", stripped, re.IGNORECASE):
+                checklist_line_indices.append(idx)
+                m = re.match(r"^\s*" + name_escaped + r"\s*:\s*(\S.*)", stripped, re.IGNORECASE)
+                if m:
+                    has_content = True
+                break
+
+    # Remove only if: ≥3 blank sections, no content, and no checklist label
+    if not has_content and len(checklist_line_indices) >= 3:
+        remove_set = set(checklist_line_indices)
+        return "".join(line for idx, line in enumerate(lines) if idx not in remove_set)
+
+    return text
 
 
 def _dedup_checklist_sections(text: str) -> str:
