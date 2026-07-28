@@ -247,11 +247,14 @@ _READ_SYSTEM = (
 )
 
 _READ_USER = (
-    "Reconstruct page {page} of this medical document as a structured form "
-    "template following the format rules: headings, 'Label : value' fields, "
-    "grouped side-by-side fields, marked circled options, and handwritten "
-    "annotations attached to their fields. Expand medical shorthand in "
-    "parentheses. EXTRACT EVERY WORD visible on the page — guess uncertain "
+    "You are looking at ONE single page image — page {page}. "
+    "Extract ONLY what is visible in THIS image. "
+    "Do NOT include any content from other pages of the document. "
+    "Reconstruct this page as a structured form template following the format rules: "
+    "headings, 'Label : value' fields, grouped side-by-side fields, marked circled "
+    "options, and handwritten annotations attached to their fields. "
+    "Expand medical shorthand in parentheses. "
+    "EXTRACT EVERY WORD visible in THIS image — guess uncertain "
     "words with (?) but NEVER write [illegible]. Leave nothing out."
 )
 
@@ -466,13 +469,16 @@ _PAGE_SYSTEM = (
 )
 
 _PAGE_USER = (
-    "Read page {page} of this medical document ONCE, carefully, then output "
+    "You are looking at ONE single page image — page {page}. "
+    "Extract ONLY what is physically visible in THIS image. "
+    "Do NOT use content from memory, other pages, or previous extractions. "
+    "Read page {page} ONCE carefully, then output "
     f"the two sections per the contract: '{_RAW_DELIM}' followed by the "
     "structured plain-text form template, then "
     f"'{_LAYOUT_DELIM}' followed by the compact HTML fragment (host classes "
     "hw/cut/stamp/unc, real tables, minimal inline styles, no absolute "
     "positioning). Same spelling for every word in both sections. "
-    "EXTRACT EVERY WORD on the page — guess uncertain words with (?) but "
+    "EXTRACT EVERY WORD visible in THIS image — guess uncertain words with (?) but "
     "NEVER write [illegible]. Nothing may be skipped or omitted."
 )
 
@@ -534,8 +540,11 @@ _FIELDS_SYSTEM = (
 )
 
 _FIELDS_USER = (
-    "Extract the structured JSON for this {n}-page document. All pages are "
-    "attached in order. Return only the JSON object."
+    "Extract the structured JSON for this {n}-page document. "
+    "Each image is labeled with its page number. "
+    "Extract fields and medicines from the ENTIRE document but keep each "
+    "field's value strictly from the page where it appears — do NOT mix "
+    "data across pages. Return only the JSON object."
 )
 
 
@@ -1379,13 +1388,16 @@ def read_structured_fields(images: list) -> tuple:
 
     images = images[:_FIELDS_MAX_PAGES]
     images_b64 = [b64 for _, b64, _ in images]
+    # Build a page-labeling preamble so the model knows which image = which page
+    page_labels = ", ".join(f"image {i+1} = page {n}" for i, (n, _, _) in enumerate(images))
+    fields_user = _FIELDS_USER.format(n=len(images)) + f"\n\nPage mapping: {page_labels}."
 
     last_err = None
     for attempt in range(4):
         try:
             raw, _reason = _ollama_chat(
                 system_prompt,
-                _FIELDS_USER.format(n=len(images)),
+                fields_user,
                 images_b64,
                 _VISION_MAX_TOKENS,
                 json_mode=True,
