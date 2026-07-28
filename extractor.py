@@ -672,10 +672,52 @@ def _clean_checklist_sections(text: str) -> str:
     result = "".join(output)
     # Fix symbol notation on everything that's left
     result = _fix_circled_symbols(result)
-    # Strip blank TNM staging grids — remove printed I/II/III/IV T/N/M labels
-    # when no actual values are marked (model often copies the printed grid)
+    # Strip blank TNM staging grids
     result = _clean_stage_grids(result)
+    # Deduplicate checklist sections — keep only the FIRST occurrence of each
+    result = _dedup_checklist_sections(result)
     return result
+
+
+def _dedup_checklist_sections(text: str) -> str:
+    """
+    Remove duplicate Circle-if-Positive section headings.
+    The 32B model sometimes outputs the left column sections twice —
+    once blank, once with content. Keep only the FIRST occurrence of each.
+    Also removes spurious STAGE entries that duplicate earlier ones.
+    """
+    sec_patterns = [
+        (name, re.compile(r"^\s*" + pat, re.IGNORECASE))
+        for name, pat in _CIRCLE_IF_POSITIVE_SECTIONS
+    ]
+    seen_sections = set()
+    lines = text.splitlines(keepends=True)
+    output = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.rstrip("\n").strip()
+        matched_name = None
+        for name, rx in sec_patterns:
+            if rx.match(stripped):
+                matched_name = name
+                break
+        if matched_name is not None:
+            if matched_name in seen_sections:
+                # Skip this duplicate section (and any continuation lines)
+                i += 1
+                while i < len(lines):
+                    next_s = lines[i].rstrip("\n").strip()
+                    is_sec = any(rx.match(next_s) for _, rx in sec_patterns)
+                    is_right = bool(_RIGHT_COLUMN_MARKERS.match(next_s))
+                    if is_sec or is_right or not next_s:
+                        break
+                    i += 1
+                continue
+            seen_sections.add(matched_name)
+        output.append(line)
+        i += 1
+    return "".join(output)
 
 
 def _clean_stage_grids(text: str) -> str:
@@ -966,7 +1008,13 @@ _LOCAL_RULES = (
     "Only output stage values that are actually marked (e.g. T2, N0, M0).\n\n"
     "RULE 8 — NO [illegible]:\n"
     "Always guess handwritten words. Mark uncertain with (?). "
-    "Never write [illegible].\n"
+    "Never write [illegible].\n\n"
+    "RULE 9 — NO HALLUCINATION:\n"
+    "ONLY extract text that is physically visible in the image you are reading. "
+    "Do NOT invent, fabricate, or fill in content from memory or other pages. "
+    "If a field is blank or unreadable → write (blank) or (?). "
+    "Never write diagnoses, drug names, doctor names, or hospital names "
+    "that are not actually printed or written in THIS specific image.\n"
 )
 
 # Imperative commands appended to USER message — highest priority for the model.
@@ -977,12 +1025,15 @@ _LOCAL_USER_RULES = (
     "3. CHECKLISTS (GENERAL / G.I. TRACT / ENT / BREAST / G.U. TRACT / "
     "MUSCULO-SKELETAL / PAST HISTORY / FAMILY HISTORY): output heading + colon. "
     "After colon: ONLY circled words. Nothing circled = blank. "
-    "DO NOT copy the printed symptom list.\n"
+    "DO NOT copy the printed symptom list. Output each section ONCE only.\n"
     "4. CIRCLED SYMBOLS: (+) = circled plus, (-) = circled minus, "
     "(L) = circled L, (R) = circled R. NEVER write '@'.\n"
     "5. HOSPITAL NO: preserve slash — '14179/26' not '1417926'.\n"
     "6. STAGE GRID: if blank → 'STAGE : (blank)'. Only output marked values.\n"
     "7. NO [illegible]: guess every word with (?).\n"
+    "8. NO HALLUCINATION: only write what you can physically see in THIS image. "
+    "Never invent diagnoses, drug names, doctor names, or any content "
+    "not visible in this specific image.\n"
 )
 
 
