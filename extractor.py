@@ -90,6 +90,21 @@ B. PRESCRIPTION / CLINIC NOTE PAGE
    - Then every prescription item or note on its own line, top to
      bottom, exactly in the order written on the page.
 
+C. TWO-COLUMN FORM PAGE
+   (printed checklist / form on one half of the page, handwritten
+   clinical notes on the other half)
+   - Extract BOTH halves completely — the printed half AND every
+     handwritten line on the other half.
+   - Output each handwritten section under its own printed heading
+     (e.g. COMPLAINTS AND DURATION, HISTORY OF PRESENT ILLNESS,
+     PAST HISTORY, GENERAL EXAMINATION), keeping every line.
+   - Handwriting placed to the RIGHT of a heading on the same row
+     (e.g. a value written beside "P.B.") belongs to that row —
+     extract it too.
+
+If you are NOT CERTAIN the page shows a printed results grid, treat it
+as a note page (B) — do not create a table.
+
 --------------------------------------
 OUTPUT STRUCTURE
 --------------------------------------
@@ -141,6 +156,18 @@ doses, vitals or notes).
 - Output side-by-side groups either on one line separated by " | ",
   or as consecutive lines in left-to-right order.
 
+9. FINAL COMPLETENESS SWEEP
+Before finishing, look over the page once more for handwriting you
+have not yet transcribed:
+- page margins and corners
+- the right half of every row
+- the space between printed sections
+- below the last printed section
+- consecutive handwritten lines under one heading — count them on the
+  page and make sure the SAME number of lines appears in your output
+  (do not skip alternate lines).
+Add anything found, in its correct position.
+
 --------------------------------------
 CIRCLE-IF-POSITIVE CHECKLISTS
 --------------------------------------
@@ -165,9 +192,17 @@ Rules:
 - Determine whether each item was selected by the clinician.
 - Selection may appear as: circle, tick/check mark, underline,
   cross mark, highlight, or obvious handwritten selection.
+- Mark (Circled) ONLY when a drawn pen mark clearly encloses,
+  ticks, or underlines that EXACT item.
+- If a mark is ambiguous, faint, touches several items, or you are
+  not sure — do NOT mark any item. A false (Circled) is worse than
+  a missed one.
+- Never mark an item merely because a neighbouring item is marked,
+  and never infer selection from the diagnosis or other pages.
+- Commas, print artifacts, shadows and paper folds are NOT selection
+  marks.
 - For selected items append: (Circled)
 - For unselected items: output without any marker.
-- Only mark items that show clear visual evidence of selection.
 
 Example:
   GENERAL :
@@ -240,6 +275,8 @@ _READ_USER = (
     "- Append '(Circled)' to selected items.\n"
     "- Leave unselected items unchanged.\n"
     "- Do not infer selections without visual evidence.\n"
+    "- If a mark is ambiguous or you are unsure, leave the item "
+    "UNMARKED — a false '(Circled)' is worse than a missed one.\n"
     "- Do NOT add checklist sections to pages that do not have this label.\n\n"
     "Handwriting:\n"
     "- Never output [illegible].\n"
@@ -801,6 +838,8 @@ _LOCAL_RULES = (
     "- For unselected items, output the item without any marker.\n"
     "- Only use (Circled) when there is clear visual evidence of selection.\n"
     "- Never infer selection from surrounding text or diagnoses.\n"
+    "- When in doubt, leave the item UNMARKED — a false (Circled) is worse "
+    "than a missed one. Never mark an item because its neighbour is marked.\n"
     "Example:\n"
     "  GENERAL : Fatigue (Circled), Weight loss, Chills, Unexplained fever\n"
     "  FAMILY HISTORY : Cancer, Tuberculosis (Circled), Diabetes\n\n"
@@ -862,6 +901,10 @@ _LOCAL_USER_RULES = (
     "- Handwritten text extracted with same priority as printed text.\n"
     "- Every row scanned across its FULL width — no group on the middle or "
     "right side of a row is missed.\n"
+    "- Consecutive handwritten lines under a heading: ALL transcribed — "
+    "count the lines on the page and match that count in your output.\n"
+    "- (Circled) used ONLY with clear visual evidence; when unsure, leave "
+    "the item unmarked.\n"
     "- Tabular reports formatted as tables; prescriptions line-by-line, "
     "never forced into a table.\n"
 )
@@ -912,6 +955,83 @@ def _ollama_chat(system_prompt: str, user_text: str, images_b64: list,
     body = res.json()
     content = (body.get("message", {}).get("content") or "").strip()
     return content, body.get("done_reason", "")
+
+
+# ── Orientation auto-correction ──────────────────────────────────────────
+# Ward photos are often captured sideways or upside-down; a rotated page
+# destroys the VLM's reading order (garbled text, missed handwriting,
+# hallucinated tables). Each page is uprighted BEFORE extraction using one
+# tiny vision call on a downscaled copy.
+_ORIENT_MAX_EDGE = 768
+# A single-image YES/NO check is the only orientation question small VLMs
+# answer reliably (4-way "how many degrees" and 2-image comparisons were
+# tested and found position-biased / constant-answer).
+_UPRIGHT_SYSTEM = (
+    "You check one photo of a document. Answer EXACTLY YES or NO: "
+    "YES only if the text is upright and reads normally left-to-right; "
+    "NO if the text is sideways or upside-down."
+)
+_UPRIGHT_USER = (
+    "Is the document text in this image upright and readable "
+    "left-to-right? Answer YES or NO only."
+)
+
+
+def _is_upright(img: Image.Image):
+    """Ask the vision model whether the page reads upright.
+    Returns True / False, or None on any failure — never raises."""
+    try:
+        small = img.copy()
+        small.thumbnail((_ORIENT_MAX_EDGE, _ORIENT_MAX_EDGE))
+        if small.mode not in ("RGB", "L"):
+            small = small.convert("RGB")
+        buf = io.BytesIO()
+        small.save(buf, format="JPEG", quality=70)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        raw, _ = _ollama_chat(_UPRIGHT_SYSTEM, _UPRIGHT_USER, [b64], 5)
+        ans = (raw or "").strip().upper()
+        if ans.startswith("YES"):
+            return True
+        if ans.startswith("NO"):
+            return False
+        return None
+    except Exception as e:
+        print(f"[WARNING] Orientation check failed: {e}")
+        return None
+
+
+def _upright(img: Image.Image, page_num: int) -> Image.Image:
+    """
+    Rotate the page image so its text is upright. Never raises.
+
+    Portrait pages are assumed upright and only flipped when the model
+    positively confirms BOTH that the original is not upright AND that
+    the 180° flip is — so a flaky answer can never break a good page.
+    Landscape pages are almost always sideways phone photos: try 90° CW
+    then 90° CCW and keep the first candidate the model confirms; if
+    neither is confirmed the original is kept (true landscape document).
+    """
+    try:
+        w, h = img.size
+        if h >= w:
+            if _is_upright(img) is False:
+                flipped = img.rotate(180)
+                if _is_upright(flipped) is True:
+                    print(f"[INFO] Page {page_num}: upside-down photo — rotated 180°")
+                    return flipped
+            return img
+        for deg in (90, 270):
+            cand = img.rotate(-deg, expand=True)  # negative = clockwise
+            if _is_upright(cand) is True:
+                print(f"[INFO] Page {page_num}: sideways photo — "
+                      f"rotated {deg}° clockwise")
+                return cand
+        print(f"[INFO] Page {page_num}: landscape page kept as-is "
+              f"(no rotation confirmed)")
+        return img
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: orientation correction skipped: {e}")
+        return img
 
 
 def read_prescription_image(b64_image: str, page_num: int, mime: str = "image/jpeg") -> str:
@@ -1396,6 +1516,7 @@ def _render_pdf_pages(data: bytes) -> list:
             img = bitmap.to_pil()
             if img.mode in ("RGBA", "LA"):
                 img = img.convert("RGB")
+            img = _upright(img, i + 1)
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=90, optimize=True)
             buf.seek(0)
@@ -1416,8 +1537,21 @@ def extract(data: bytes, ext: str) -> tuple:
     if ext == ".pdf":
         rendered = [(n, b64, "image/jpeg") for n, b64 in _render_pdf_pages(data)]
     else:
-        b64 = base64.b64encode(data).decode("utf-8")
-        rendered = [(1, b64, _MIME.get(ext, "image/jpeg"))]
+        # Open, upright and re-encode direct image uploads too, so a
+        # sideways phone photo is corrected before extraction.
+        try:
+            img = Image.open(io.BytesIO(data))
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img = _upright(img, 1)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=90, optimize=True)
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            rendered = [(1, b64, "image/jpeg")]
+        except Exception as e:
+            print(f"[WARNING] Image preprocessing failed ({e}); using original bytes")
+            b64 = base64.b64encode(data).decode("utf-8")
+            rendered = [(1, b64, _MIME.get(ext, "image/jpeg"))]
 
     # ONE combined transcript+layout call per page (single reading — both
     # views agree and the image is paid for once), plus one fields call per
@@ -1435,8 +1569,9 @@ def extract(data: bytes, ext: str) -> tuple:
             if layout_html:
                 # Cut the real stamps/signatures/diagrams out of the page
                 # image and embed them where the model marked data-bbox.
-                page_bytes = data if ext != ".pdf" else base64.b64decode(b64)
-                layout_html = _embed_region_crops(layout_html, page_bytes)
+                # b64 is the (possibly rotation-corrected) image the model
+                # actually saw, so its bbox coordinates match this image.
+                layout_html = _embed_region_crops(layout_html, base64.b64decode(b64))
             pages.append({
                 "page": n,
                 "text": text,
