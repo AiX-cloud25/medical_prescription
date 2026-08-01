@@ -70,6 +70,31 @@ CORE RULES
   Example: lymphadenopathy(?)
 
 --------------------------------------
+LANGUAGE
+--------------------------------------
+
+If any text on the page is written in a non-English / regional script
+(Kannada, Hindi, Tamil, Telugu, or any other Indian regional language),
+translate its MEANING into natural English — do not leave it in the
+original script and do not transliterate it phonetically.
+  Example: ಕಫ ಔಷಧಿ ದಿನಕ್ಕೆ 3 ಬಾರಿ -> Cough medicine 3 times a day
+
+EXCEPTION — proper nouns: patient names, doctor names, place names, and
+facility names written in a regional script must be TRANSLITERATED into
+Roman letters (their phonetic English spelling), never translated as if
+they were ordinary words.
+  Example: ಕವಿತಾ -> Kavitha   (not a literal word-for-word translation)
+
+If the translation itself is uncertain, append (?) to the translated
+word or phrase, the same as any other uncertain reading.
+
+Your entire output must contain ONLY English/Roman letters, digits and
+punctuation. Never output Kannada, Devanagari/Hindi, Tamil, Telugu or
+any other script anywhere — translate (or transliterate names) instead.
+Never convert one Indian script into another (e.g. Kannada text must
+never come out as Hindi/Devanagari).
+
+--------------------------------------
 PAGE TYPE — CHOOSE THE RIGHT FORMAT
 --------------------------------------
 
@@ -80,7 +105,11 @@ A. TABULAR REPORT PAGE
    as a grid of rows and columns)
    - Output the report header (facility, patient details, dates)
      first as Label : Value lines.
-   - Output the results as a pipe-separated table (rule 6).
+   - Output the results as a pipe-separated table (rule 6): ONE row per
+     test with its Result and Reference Range in separate columns.
+   - NEVER output lab results as one line per value, as Label : Value
+     pairs, or as running text — a printed results grid is ALWAYS a
+     table, in BOTH the raw text and the HTML layout.
 
 B. PRESCRIPTION / CLINIC NOTE PAGE
    (mostly handwritten; no printed results grid)
@@ -136,6 +165,9 @@ Example:
   Hb        | 12.8   | 11.0 - 14.0
 
 Maintain row order and column alignment.
+For printed lab/haematology/biochemistry reports: one pipe row per test,
+keeping Result and Reference Range in their own columns. Never flatten a
+results grid into one line per value or Label : Value pairs.
 
 7. NARRATIVE TEXT
 For paragraphs, clinic notes and histories:
@@ -227,6 +259,21 @@ Example:
 Never convert these symbols into @ or other characters.
 
 --------------------------------------
+MEDICAL SHORTHAND
+--------------------------------------
+
+Recognize common clinical shorthand and transcribe it exactly:
+  C/o = Complains of    H/o = History of     K/c/o = Known case of
+  O/E = On examination  R/o = Rule out       b/l = bilateral
+  F/H = Family history  P/H = Past history   S/p = Status post
+  LMP, EDD, D/x, R/x, ECOG
+
+Handwritten "C/o" at the start of a complaint line is often misread as
+"y/o", "yo" or "40" — when a line begins a complaint, prefer C/o.
+ECOG is a performance status (e.g. ECOG-2) — never transcribe it as
+"ECG-2" when written beside a general-examination note.
+
+--------------------------------------
 TNM / STAGE GRIDS
 --------------------------------------
 
@@ -245,17 +292,18 @@ Preserve all identifiers exactly.
 Never merge digits or remove slashes.
 
 --------------------------------------
-STAMPS / SIGNATURES / DIAGRAMS / IMAGES
+STAMPS / SIGNATURES / DIAGRAMS
 --------------------------------------
 
-  Stamps:       [STAMP: text]
-  Signatures:   [SIGNATURE: text]
-  Diagrams:     [DIAGRAM: description and markings]
-  Photos/Logos: [IMAGE: short description]
+  Stamps:     [STAMP: text]
+  Signatures: [SIGNATURE: text]
+  Hand-drawn clinical drawings (anatomy sketches, lesion maps,
+  marked-up body outlines): [DIAGRAM: description and markings]
 
-Every picture printed or pasted on the page (photograph, hospital logo,
-graphic seal, barcode/QR code, scanned image) must be recorded with an
-[IMAGE: ...] marker at its position in the reading order.
+Logos, letterhead emblems, medical symbols (caduceus), barcodes,
+QR codes, watermarks, photographs and decorative graphics: IGNORE the
+graphic entirely — no marker for it. The letterhead TEXT itself is
+still transcribed as normal text.
 """
 
 _READ_USER = (
@@ -311,8 +359,8 @@ AVAILABLE CLASSES
   hw     Handwritten content.
   stamp  Text-only stamps, seals, and signatures.
   unc    Uncertain text.
-  cut    ANY pictorial region: photos, logos, printed diagrams,
-         hand-drawn sketches, graphic seals, barcodes, QR codes.
+  cut    Hand-drawn clinical drawings ONLY: anatomy sketches,
+         lesion maps, marked-up drawings with pen annotations.
 
 Examples:
   <span class="hw">Left breast lump x 6 months</span>
@@ -347,6 +395,10 @@ Narrative notes  Use paragraphs.
 
 Use a real HTML <table> ONLY when the page itself shows a genuine
 printed grid of rows and columns (lab / investigation reports).
+When the page IS a printed lab/haematology/biochemistry report, the
+results MUST be one real <table> with one <tr> per test and separate
+<td> cells for Test Name, Result, and Reference Range — never a stack
+of single-line divs.
 Prescription pages and handwritten clinic notes must NOT be converted
 into tables — render them as a header, label:value lines, and
 line-by-line notes in the order written on the page.
@@ -374,12 +426,32 @@ For '(Circle If Positive)' sections (only when present on the page):
 - Include all checklist items present in the extracted text.
 - If an item is selected, append '(Circled)'.
 - If not selected, leave unchanged.
+- Wrap the ENTIRE printed checklist (the '(Circle If Positive)' label and
+  all its printed headings, e.g. GENERAL through FAMILY HISTORY) in ONE
+  container: <div class="checklist"> ... </div> — this draws a border
+  around the checklist so it is visually separate.
+- Handwritten clinical sections (COMPLAINTS AND DURATION, HISTORY OF
+  PRESENT ILLNESS, PAST HISTORY notes, GENERAL EXAMINATION, etc.) are
+  NEVER part of the checklist — put them OUTSIDE the checklist div. When
+  the page shows the checklist on one half and handwritten notes on the
+  other half, use a two-column flex row: checklist div in one column,
+  handwritten sections in the other.
 
 Example:
-  <div>
-    <strong>GENERAL:</strong>
-    Fatigue (Circled), Weight loss, Chills
+  <div style="display:flex;gap:12px">
+    <div class="checklist" style="flex:1">
+      <div>(Circle If Positive)</div>
+      <div><strong>GENERAL:</strong>
+      Fatigue (Circled), Weight loss, Chills</div>
+      ...
+    </div>
+    <div style="flex:1">
+      <div><strong>COMPLAINTS AND DURATION</strong></div>
+      <div><span class="hw">C/o &lt;complaint&gt; x &lt;duration&gt;</span></div>
+      ...
+    </div>
   </div>
+(The example content is placeholder only — always read the actual page.)
 
 ------------------------------------
 SPECIAL CONTENT
@@ -387,18 +459,19 @@ SPECIAL CONTENT
 
   Stamps:     <span class="stamp">[STAMP: text]</span>
   Signatures: <span class="stamp">[SIGNATURE: name]</span>
-  Pictures:   <img class="cut" data-bbox="X,Y,W,H" alt="[IMAGE: description]">
+  Drawings:   <img class="cut" data-bbox="X,Y,W,H" alt="[DIAGRAM: description]">
 
-EVERY picture on the page (photo, logo, printed diagram, hand-drawn
-sketch, graphic seal, barcode, QR code) MUST be output as exactly ONE
-img.cut tag, placed at its position in the reading order.
+Hand-drawn clinical drawings (anatomy sketch, lesion map, marked-up
+body outline) MUST each be output as exactly ONE img.cut tag, placed
+at the drawing's reading-order position.
 - data-bbox is REQUIRED. X,Y = top-left corner, W,H = width,height —
-  all four are PERCENTAGES (0-100) of the full page.
-  Example: a hospital logo in the top-left tenth of the page
-  -> data-bbox="2,1,12,8".
-- Never redraw a picture as text or ASCII art. Never omit data-bbox.
-- Text-only rubber stamps stay <span class="stamp">; use img.cut when
-  the stamp/seal is a graphic image.
+  all four are PERCENTAGES (0-100) of the full page. Cover the WHOLE
+  drawing including its pen annotations.
+- Never redraw a drawing as text or ASCII art. Never omit data-bbox.
+- NEVER emit img.cut for: logos, letterhead emblems, medical symbols
+  (caduceus), barcodes, QR codes, watermarks, photographs, decorative
+  graphics — omit those entirely.
+- Text-only rubber stamps stay <span class="stamp">.
 
 ------------------------------------
 ACCURACY RULES
@@ -428,12 +501,13 @@ _LAYOUT_USER = (
     "- class=\"stamp\" for stamps, seals, logos, and signatures.\n"
     "- class=\"unc\" for uncertain text containing '(?)' — wrap each "
     "uncertain word in its own <span class=\"unc\">.\n"
-    "- class=\"cut\" for every pictorial region: photos, logos, diagrams, "
-    "sketches, charts, figures, graphic seals, barcodes, QR codes.\n\n"
-    "For every picture (photo, logo, diagram, seal, barcode):\n"
-    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[IMAGE: description]\">\n"
+    "- class=\"cut\" ONLY for hand-drawn clinical drawings (anatomy "
+    "sketches, lesion maps, marked-up outlines) — never logos, emblems, "
+    "medical symbols, barcodes, QR codes or decorative graphics.\n\n"
+    "For every hand-drawn clinical drawing:\n"
+    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[DIAGRAM: description]\">\n"
     "data-bbox is REQUIRED — X,Y,W,H are percentage coordinates (0-100) "
-    "relative to the page, placed where the picture sits in reading order.\n\n"
+    "relative to the page, placed where the drawing sits in reading order.\n\n"
     "Checklist sections:\n"
     "- Preserve all checklist items present in the extracted content.\n"
     "- Append '(Circled)' to selected items.\n"
@@ -625,6 +699,14 @@ registration numbers, dates, or doctor names. Transcribe exactly as written.
 
 9. EMPTY DOCUMENTS
 If no fields are found: {"fields": [], "medicines": []}
+
+10. LANGUAGE
+Narrative/free-text field values (e.g. chief_complaints, diagnosis,
+family_history, advice, instructions) written in a regional script are
+translated into English. Proper-noun fields (patient_name, doctor_name,
+facility_name) are transliterated into Roman letters instead — never
+translated as ordinary words. This does not relax rule 8: names are
+still transcribed in full, just in Roman script.
 
 Return ONLY the JSON object.
 """
@@ -820,7 +902,23 @@ def _clean_checklist_html(html: str) -> str:
 
 # Crops embedded into the layout are capped to this long-edge size.
 _CROP_MAX_EDGE = int(os.getenv("CROP_MAX_EDGE", "500"))
-_CROP_PAD_PCT = 2.0
+# Padding (page-percent) added around a bbox before cropping — generous
+# so slightly-tight model boxes still capture the whole drawing.
+_CROP_PAD_PCT = float(os.getenv("CROP_PAD_PCT", "4.0"))
+
+# Dedicated diagram-detection pass (second grounding call per page with
+# diagram signals). 0 disables and falls back to inline layout bboxes.
+_DETECT_DIAGRAMS = os.getenv("DETECT_DIAGRAMS", "1").strip().lower() in (
+    "1", "true", "yes", "on")
+_DIAGRAM_MAX_PER_PAGE = 6
+# Loose match threshold: the layout call's bbox may be badly off, so a
+# modest overlap is enough to say "same drawing" and adopt the
+# detector's box instead.
+_DIAGRAM_MATCH_IOU = 0.30
+# Descriptions/alts that mean "not a clinical drawing" — never cropped.
+_LOGO_ALT_RX = re.compile(
+    r"logo|emblem|caduceus|symbol|barcode|qr\b|watermark|letterhead|"
+    r"photo|seal|crest|icon", re.IGNORECASE)
 
 
 def _normalize_bbox(x, y, w, h, pw, ph):
@@ -851,14 +949,42 @@ def _bbox_iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
+def _crop_style_for_box(x, y, w, h) -> str:
+    """
+    Inline style that mirrors the drawing's position on the original page:
+    right-half drawings float right beside the text, left-half float left,
+    wide/centered ones render as a centered block.
+    """
+    cx = x + w / 2
+    if w >= 55:
+        return "display:block;margin:8px auto;"
+    if cx >= 55:
+        return "float:right;margin:4px 0 8px 12px;max-width:48%;"
+    if cx <= 45:
+        return "float:left;margin:4px 12px 8px 0;max-width:48%;"
+    return "display:block;margin:8px auto;"
+
+
+def _tag_alt(tag: str) -> str:
+    m = re.search(r'\balt\s*=\s*("[^"]*"|\'[^\']*\')', tag, re.IGNORECASE)
+    return m.group(1)[1:-1] if m else ""
+
+
 def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
     """
     Replace <img class="cut" data-bbox="x,y,w,h" ...> placeholders in the
     layout fragment with real crops of the page image as data: URIs.
-    Coordinates are percentages of the page. Per-crop failures leave the
-    tag without a src (its alt text shows instead). Never raises.
+    Coordinates are percentages of the page. Tags describing logos or
+    similar non-clinical graphics are deleted outright. Per-crop failures
+    leave the tag src-less only when its alt is a [DIAGRAM marker (shown
+    as a dashed placeholder); otherwise the tag is removed. Never raises.
     """
-    if not fragment or "data-bbox" not in fragment:
+    if not fragment:
+        return fragment
+    cut_rx = re.compile(
+        r'<img\b[^>]*data-bbox\s*=\s*["\']([\d.,\s]+)["\'][^>]*>',
+        re.IGNORECASE)
+    if "data-bbox" not in fragment:
         return fragment
     try:
         img = Image.open(io.BytesIO(page_image_bytes))
@@ -871,23 +997,31 @@ def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
 
     injected = []  # percent boxes already embedded on this page
 
+    def _keep_or_drop(tag):
+        """Failed/rejected tag: keep dashed placeholder only for diagrams."""
+        return tag if _tag_alt(tag).lstrip().upper().startswith("[DIAGRAM") \
+            else ""
+
     def _crop_tag(match):
         tag = match.group(0)
         try:
+            # Logos/emblems/barcodes are never embedded, whatever the bbox.
+            if _LOGO_ALT_RX.search(_tag_alt(tag)):
+                return ""
             x, y, w, h = [float(v) for v in match.group(1).split(",")]
             box = _normalize_bbox(x, y, w, h, pw, ph)
             if box is None:
-                return tag
+                return _keep_or_drop(tag)
             x, y, w, h = box
-            # Duplicate tag for the same region (model repeats a logo).
+            # Duplicate tag for the same region (model repeats a drawing).
             if any(_bbox_iou(box, prev) > 0.8 for prev in injected):
-                return tag
+                return ""
             left = max(0, int((x - _CROP_PAD_PCT) / 100 * pw))
             top = max(0, int((y - _CROP_PAD_PCT) / 100 * ph))
             right = min(pw, int((x + w + _CROP_PAD_PCT) / 100 * pw))
             bottom = min(ph, int((y + h + _CROP_PAD_PCT) / 100 * ph))
             if right - left < 4 or bottom - top < 4:
-                return tag
+                return _keep_or_drop(tag)
             injected.append(box)
             crop = img.crop((left, top, right, bottom))
             scale = _CROP_MAX_EDGE / max(crop.size)
@@ -898,17 +1032,18 @@ def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
             buf = io.BytesIO()
             crop.save(buf, format="JPEG", quality=80)
             b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-            # Drop any src the model invented, then inject the real one.
-            cleaned = re.sub(r'\ssrc\s*=\s*("[^"]*"|\'[^\']*\')', "", tag,
-                             flags=re.IGNORECASE)
+            # Drop model-invented src/style, then inject the real crop and
+            # a position style mirroring the original page placement.
+            cleaned = re.sub(r'\s(?:src|style)\s*=\s*("[^"]*"|\'[^\']*\')',
+                             "", tag, flags=re.IGNORECASE)
             return cleaned[:-1].rstrip("/").rstrip() + \
+                f' style="{_crop_style_for_box(x, y, w, h)}"' + \
                 f' src="data:image/jpeg;base64,{b64}">'
         except Exception as e:
             print(f"[WARNING] region crop failed: {e}")
-            return tag
+            return _keep_or_drop(tag)
 
-    return re.sub(r'<img\b[^>]*data-bbox\s*=\s*["\']([\d.,\s]+)["\'][^>]*>',
-                  _crop_tag, fragment, flags=re.IGNORECASE)
+    return cut_rx.sub(_crop_tag, fragment)
 
 
 # Reinforcement appended AFTER the main system prompt.
@@ -991,7 +1126,16 @@ _LOCAL_RULES = (
     "11. PAGE-TYPE FORMAT\n"
     "Format tabular report pages (printed grids of lab/investigation results) "
     "as tables. Format prescription and clinic-note pages as header + patient "
-    "details + line-by-line items, never as a table.\n"
+    "details + line-by-line items, never as a table.\n\n"
+
+    "12. LANGUAGE — TRANSLATE TO ENGLISH\n"
+    "Any text in Kannada or another regional script is translated into "
+    "natural English, not transliterated and not left in the original "
+    "script. Exception: patient/doctor/place names are transliterated into "
+    "Roman letters, never translated as ordinary words. Uncertain "
+    "translations still get (?). Your output must contain ONLY "
+    "English/Roman characters — never any Kannada, Devanagari, Tamil or "
+    "other script, and never one Indian script converted into another.\n"
 )
 
 # Commands appended to the USER message — processed last before generation.
@@ -1010,14 +1154,19 @@ _LOCAL_USER_RULES = (
     "- Consecutive handwritten lines under a heading: ALL transcribed — "
     "count the lines on the page and match that count in your output, even "
     "when wide blank space separates them.\n"
-    "- Every picture (photo, logo, diagram, seal, barcode) has one "
-    "<img class=\"cut\" data-bbox=\"X,Y,W,H\"> tag in the HTML section, at "
-    "its reading-order position, with percentage coordinates.\n"
+    "- Hand-drawn clinical drawings (and ONLY those — no logos, emblems, "
+    "barcodes, QR codes) each have one <img class=\"cut\" "
+    "data-bbox=\"X,Y,W,H\"> tag in the HTML section, at their "
+    "reading-order position, with percentage coordinates.\n"
     "- Every (?) word is wrapped in <span class=\"unc\"> in the HTML section.\n"
     "- (Circled) used ONLY with clear visual evidence; when unsure, leave "
     "the item unmarked.\n"
     "- Tabular reports formatted as tables; prescriptions line-by-line, "
     "never forced into a table.\n"
+    "- Any Kannada/regional-script text is translated to English (names are "
+    "transliterated, not translated).\n"
+    "- Complaint lines start with C/o (Complains of) — never transcribed as "
+    "\"y/o\" or \"40\".\n"
 )
 
 
@@ -1330,11 +1479,12 @@ _LAYOUT_SLIM_SYSTEM = (
     "Printed form text (headings, labels, symptom lists, footers) is NEVER hw — plain text only.\n"
     "- class=\"unc\" = uncertain words with (?) suffix.\n"
     "- class=\"stamp\" = stamps, seals, signatures: '[STAMP: text]'.\n"
-    "- class=\"cut\" = every pictorial region (photo, logo, diagram, sketch, "
-    "graphic seal, barcode, QR code): "
-    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[IMAGE: description]\"> — "
+    "- class=\"cut\" = hand-drawn clinical drawings ONLY (anatomy sketch, "
+    "lesion map, marked-up outline): "
+    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[DIAGRAM: description]\"> — "
     "data-bbox REQUIRED, X,Y,W,H as percentages (0-100) of the page, tag "
-    "placed at the picture's reading-order position.\n"
+    "placed at the drawing's reading-order position. NEVER img.cut for "
+    "logos, emblems, medical symbols, barcodes, QR codes, watermarks.\n"
     "- NO position:absolute, NO negative margins.\n"
     "- Mirror the image structure: single-column page → single column HTML. "
     "Two-column page → flex row. Printed symptom list → <p> not <table>. "
@@ -1345,6 +1495,8 @@ _LAYOUT_SLIM_SYSTEM = (
     "- Letterhead centered at top. Bottom items (date, signature) last.\n"
     "- Describe annotations: e.g. <span class=\"hw\">[circled: Early]</span> or "
     "<span class=\"hw\">[arrow → Lymph nodes, Pallor +]</span>.\n"
+    "- Use the TRANSCRIBED TEXT provided as the content — it is already in "
+    "English; do not copy any regional-script text from the image itself.\n"
     "- Output compact HTML only."
 )
 
@@ -1662,7 +1814,9 @@ _VERIFY_SYSTEM = (
     "vertical gaps, the right half of every row, margins and corners, and "
     "content below the last printed section. "
     "Transcribe each missing line exactly as written, appending (?) to any "
-    "uncertain word. "
+    "uncertain word. Any recovered line written in a regional script "
+    "(Kannada, Hindi, Tamil, etc.) must be translated into English (names "
+    "transliterated instead), the same as the rest of the transcription. "
     'Output ONLY JSON: {"missing": [{"after_line": <int>, "text": "<line>"}]} '
     "where after_line is the transcription line number that the missing "
     "line appears BELOW on the page (0 = above the first line). "
@@ -1675,6 +1829,75 @@ _VERIFY_USER = (
 )
 
 
+# ── Residual regional-script translation ─────────────────────────────
+# Safety net for the LANGUAGE prompt rules: if any Indic-script text
+# still made it into the output, translate the leftover fragments with
+# one text-only model call. Covers Devanagari through Malayalam
+# (U+0900-U+0D7F), which includes Kannada, Hindi, Tamil, Telugu.
+_INDIC_RUN_RX = re.compile(r"[ऀ-ൿ]+(?:[^\S\n]+[ऀ-ൿ]+)*")
+
+_TRANSLATE_SYSTEM = (
+    "You translate fragments of Indian regional-script text found in a "
+    "medical document into English. Translate the MEANING into natural "
+    "English; if a fragment is a person/place/facility name, transliterate "
+    "it into Roman letters instead of translating. Append (?) to uncertain "
+    "words. Output ONLY JSON: "
+    '{"translations": [{"original": "<fragment exactly as given>", '
+    '"english": "<English text>"}]} — one entry per fragment, same order.'
+)
+
+
+def _translate_residual_scripts(page_num: int, text: str,
+                                layout_html: str) -> tuple:
+    """
+    Replace any remaining regional-script fragments in text/layout with
+    English via one text-only call. Zero cost for English-only pages.
+    Returns (text, layout_html) — unchanged on any failure; never raises.
+    """
+    try:
+        combined = (text or "") + "\n" + (layout_html or "")
+        frags = []
+        for m in _INDIC_RUN_RX.finditer(combined):
+            frag = m.group(0).strip()
+            if frag and frag not in frags:
+                frags.append(frag)
+            if len(frags) >= 20:
+                break
+        if not frags:
+            return text, layout_html
+        user = ("Fragments:\n"
+                + "\n".join(f"{i + 1}. {f}" for i, f in enumerate(frags))
+                + "\n\nReturn the JSON now.")
+        raw, _ = _ollama_chat(_TRANSLATE_SYSTEM, user, [], 1500,
+                              json_mode=True)
+        entries = (_parse_json_loose(raw) if raw else {}).get(
+            "translations") or []
+        applied = 0
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            orig = str(e.get("original") or "").strip()
+            eng = str(e.get("english") or "").strip()
+            if not orig or not eng or _INDIC_RUN_RX.search(eng):
+                continue
+            replaced = False
+            if text and orig in text:
+                text = text.replace(orig, eng)
+                replaced = True
+            if layout_html and orig in layout_html:
+                layout_html = layout_html.replace(orig, eng)
+                replaced = True
+            if replaced:
+                applied += 1
+        print(f"[INFO] Page {page_num}: translated {applied}/{len(frags)} "
+              f"residual regional-script fragment(s)")
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: residual-script translation "
+              f"skipped ({e})")
+        return text, layout_html
+
+
 def _page_has_handwriting(text: str, layout_html: str) -> bool:
     """Heuristic: the page contains handwriting or uncertain words."""
     if layout_html and re.search(r'class\s*=\s*["\'][^"\']*\bhw\b',
@@ -1683,16 +1906,13 @@ def _page_has_handwriting(text: str, layout_html: str) -> bool:
     return "(?)" in (text or "")
 
 
-def _insert_line_into_layout(layout_html: str, anchor_line: str,
-                             cand: str) -> str:
+def _insert_html_after_anchor(layout_html: str, anchor_line: str,
+                              new_block: str) -> str:
     """
-    Insert a recovered line into the layout HTML right after the block
-    containing the anchor line (the transcript line directly above it on
-    the page). Falls back to appending at the end of the fragment.
+    Insert a pre-built HTML block right after the block containing the
+    anchor line (a transcript line). Falls back to appending at the end
+    of the fragment when the anchor cannot be located.
     """
-    escaped = (cand.replace("&", "&amp;")
-                   .replace("<", "&lt;").replace(">", "&gt;"))
-    new_block = f'<div><span class="hw">{escaped}</span></div>'
     tokens = re.findall(r"[A-Za-z0-9]+", anchor_line or "")[-6:]
     block_close = re.compile(
         r"</div\s*>|</p\s*>|</li\s*>|</tr\s*>|</h[1-6]\s*>|<br\s*/?>",
@@ -1708,6 +1928,20 @@ def _insert_line_into_layout(layout_html: str, anchor_line: str,
         pos = bm.end() if bm else m.end()
         return layout_html[:pos] + new_block + layout_html[pos:]
     return layout_html + new_block
+
+
+def _insert_line_into_layout(layout_html: str, anchor_line: str,
+                             cand: str) -> str:
+    """
+    Insert a recovered text line into the layout HTML right after the
+    block containing the anchor line (the transcript line directly above
+    it on the page).
+    """
+    escaped = (cand.replace("&", "&amp;")
+                   .replace("<", "&lt;").replace(">", "&gt;"))
+    return _insert_html_after_anchor(
+        layout_html, anchor_line,
+        f'<div><span class="hw">{escaped}</span></div>')
 
 
 def _verify_completeness(b64_image: str, page_num: int, text: str,
@@ -1770,12 +2004,241 @@ def _verify_completeness(b64_image: str, page_num: int, text: str,
         return text, layout_html
 
 
+# ── Dedicated diagram-detection pass ─────────────────────────────────
+# The combined page call is unreliable at localizing hand-drawn clinical
+# drawings (misses them, or crops logos). This focused grounding call is
+# the single source of truth: it confirms/re-boxes the layout's img.cut
+# tags, deletes unconfirmed ones, and inserts tags for missed drawings
+# anchored beside their own handwritten annotations.
+_DIAGRAM_SYSTEM = (
+    "You locate hand-drawn clinical drawings on ONE medical document page. "
+    "Report ONLY drawings made by hand with a pen: anatomy sketches "
+    "(breast, abdomen, limbs, organs), lesion/tumour maps, marked-up body "
+    "outlines, freehand clinical illustrations — including small or faint "
+    "ones. NEVER report: hospital/clinic logos, letterhead emblems, "
+    "medical symbols (caduceus, cross), barcodes, QR codes, stamps, "
+    "signatures, watermarks, printed graphics or charts, photographs, or "
+    "plain handwritten text without a drawing. "
+    'Output ONLY JSON: {"diagrams": [{"bbox": [x, y, w, h], '
+    '"description": "<what the drawing shows>", '
+    '"labels": "<handwritten words inside or next to the drawing>"}]}. '
+    "bbox: x,y = top-left corner, w,h = size, all PERCENTAGES (0-100) of "
+    "the page. Cover the WHOLE drawing including its annotations. "
+    'No drawings -> {"diagrams": []}.'
+)
+
+_DIAGRAM_USER = ("Find every hand-drawn clinical drawing on this page "
+                 "and return the JSON now.")
+
+
+def _esc_attr(s: str) -> str:
+    """Make a model-supplied description safe inside an alt attribute."""
+    return re.sub(r'["<>\[\]]', "", s or "").strip()[:80]
+
+
+def _detect_diagrams(b64_image: str, page_num: int) -> tuple:
+    """
+    One focused JSON-grounding call. Returns (dets, page_size) where dets
+    is a list of {"box": (x,y,w,h) percent, "desc": str, "labels": str},
+    [] when the call ran and found nothing, or None when both attempts
+    failed. Never raises.
+    """
+    page_size = None
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(b64_image)))
+        page_size = img.size
+    except Exception:
+        pass
+    pw, ph = page_size if page_size else (1000, 1414)
+    last_err = None
+    for attempt in range(2):
+        try:
+            raw, _ = _ollama_chat(_DIAGRAM_SYSTEM, _DIAGRAM_USER,
+                                  [b64_image], 1500, json_mode=True)
+            entries = (_parse_json_loose(raw) if raw else {}).get("diagrams")
+            if not isinstance(entries, list):
+                entries = []
+            dets = []
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                bb = e.get("bbox")
+                if not isinstance(bb, (list, tuple)) or len(bb) != 4:
+                    continue
+                try:
+                    vals = [float(v) for v in bb]
+                except (TypeError, ValueError):
+                    continue
+                box = _normalize_bbox(vals[0], vals[1], vals[2], vals[3],
+                                      pw, ph)
+                if box is None or box[2] * box[3] < 1.0:
+                    continue
+                desc = str(e.get("description") or "").strip()
+                if _LOGO_ALT_RX.search(desc):
+                    continue
+                if any(_bbox_iou(box, d["box"]) > 0.8 for d in dets):
+                    continue
+                dets.append({
+                    "box": box,
+                    "desc": desc,
+                    "labels": str(e.get("labels") or "").strip(),
+                })
+                if len(dets) >= _DIAGRAM_MAX_PER_PAGE:
+                    break
+            print(f"[INFO] Page {page_num}: diagram detector found "
+                  f"{len(dets)} drawing(s)")
+            return dets, page_size
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                time.sleep(3)
+    print(f"[WARNING] Page {page_num}: diagram detection failed ({last_err})")
+    return None, page_size
+
+
+def _merge_diagram_boxes(text: str, layout_html: str, dets,
+                         page_size) -> tuple:
+    """
+    Reconcile the layout's img.cut tags with the detector's findings.
+    Detector ran (dets is a list): its boxes are authoritative — matched
+    tags get the detector's bbox, unmatched tags are deleted (logos /
+    hallucinations), unmatched detections are inserted anchored beside
+    their annotation text. Detector failed (dets is None): tags are kept,
+    except logo-alt ones. Returns (text, layout_html); never raises.
+    """
+    try:
+        if not layout_html:
+            return text, layout_html
+        pw, ph = page_size if page_size else (1000, 1414)
+        tag_rx = re.compile(
+            r'<img\b[^>]*\bclass\s*=\s*["\'][^"\']*\bcut\b[^"\']*["\'][^>]*>',
+            re.IGNORECASE)
+        bbox_rx = re.compile(r'data-bbox\s*=\s*["\']([\d.,\s]+)["\']',
+                             re.IGNORECASE)
+        matches = list(tag_rx.finditer(layout_html))
+
+        if dets is None:
+            for m in reversed(matches):
+                if _LOGO_ALT_RX.search(_tag_alt(m.group(0))):
+                    layout_html = (layout_html[:m.start()]
+                                   + layout_html[m.end():])
+            return text, layout_html
+
+        consumed = set()
+        for m in reversed(matches):  # right-to-left keeps spans valid
+            tag = m.group(0)
+            box = None
+            bm = bbox_rx.search(tag)
+            if bm:
+                try:
+                    vals = [float(v) for v in bm.group(1).split(",")]
+                    if len(vals) == 4:
+                        box = _normalize_bbox(vals[0], vals[1], vals[2],
+                                              vals[3], pw, ph)
+                except (TypeError, ValueError):
+                    box = None
+            best_i, best_iou = -1, 0.0
+            if box is not None:
+                for i, d in enumerate(dets):
+                    if i in consumed:
+                        continue
+                    iou = _bbox_iou(box, d["box"])
+                    if iou > best_iou:
+                        best_i, best_iou = i, iou
+            if box is not None and best_iou >= _DIAGRAM_MATCH_IOU:
+                d = dets[best_i]
+                consumed.add(best_i)
+                x, y, w, h = d["box"]
+                desc = _esc_attr(d["desc"]) or _esc_attr(_tag_alt(tag)) \
+                    or "hand-drawn diagram"
+                new_tag = (f'<img class="cut" data-bbox='
+                           f'"{x:.1f},{y:.1f},{w:.1f},{h:.1f}" '
+                           f'alt="[DIAGRAM: {desc}]">')
+                layout_html = (layout_html[:m.start()] + new_tag
+                               + layout_html[m.end():])
+            else:
+                # Unconfirmed by the detector → logo or hallucination.
+                layout_html = layout_html[:m.start()] + layout_html[m.end():]
+
+        # Missed drawings: insert new tags anchored near their labels.
+        lines = text.splitlines() if text else []
+        line_tok = [set(re.findall(r"[a-z0-9]+", ln.lower()))
+                    for ln in lines]
+        inserted = 0
+        for i, d in enumerate(dets):
+            if i in consumed:
+                continue
+            x, y, w, h = d["box"]
+            desc = _esc_attr(d["desc"]) or "hand-drawn diagram"
+            new_tag = (f'<img class="cut" data-bbox='
+                       f'"{x:.1f},{y:.1f},{w:.1f},{h:.1f}" '
+                       f'alt="[DIAGRAM: {desc}]">')
+            label_toks = set(re.findall(
+                r"[a-z0-9]+", (d["labels"] or "").lower()))
+            anchor_idx, best = -1, 0
+            if label_toks:
+                need = 2 if len(label_toks) >= 3 else 1
+                for j, toks in enumerate(line_tok):
+                    ov = len(toks & label_toks)
+                    if ov > best and ov >= need:
+                        best, anchor_idx = ov, j
+            desc_toks = set(re.findall(r"[a-z0-9]+", desc.lower()))
+            has_marker = any(
+                ln.strip().upper().startswith("[DIAGRAM") and desc_toks
+                and len(set(re.findall(r"[a-z0-9]+", ln.lower()))
+                        & desc_toks) >= 0.7 * len(desc_toks)
+                for ln in lines)
+            marker = f"[DIAGRAM: {desc}]"
+            if anchor_idx >= 0:
+                layout_html = _insert_html_after_anchor(
+                    layout_html, lines[anchor_idx], new_tag)
+                if not has_marker:
+                    lines.insert(anchor_idx + 1, marker)
+                    line_tok.insert(anchor_idx + 1, set())
+            elif y + h / 2 < 33:  # top third of the page
+                layout_html = new_tag + layout_html
+                if not has_marker:
+                    lines.insert(0, marker)
+                    line_tok.insert(0, set())
+            else:
+                layout_html = layout_html + new_tag
+                if not has_marker:
+                    lines.append(marker)
+                    line_tok.append(set())
+            inserted += 1
+        if inserted and lines:
+            text = "\n".join(lines)
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] diagram merge failed ({e})")
+        return text, layout_html
+
+
+def _should_detect(text: str, layout_html: str) -> bool:
+    """Run the diagram detector only when the page shows any signal."""
+    if _page_has_handwriting(text, layout_html):
+        return True
+    if "[DIAGRAM" in (text or ""):
+        return True
+    return bool(layout_html and re.search(
+        r'class\s*=\s*["\'][^"\']*\bcut\b', layout_html))
+
+
 def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
-    """read_page + optional missed-line verification + unc wrapping."""
+    """
+    read_page + optional missed-line verification + diagram detection +
+    residual-script translation + unc wrapping.
+    """
     text, layout_html, layout_error = read_page(b64_image, page_num, mime)
     if _VERIFY and text and _page_has_handwriting(text, layout_html):
         text, layout_html = _verify_completeness(
             b64_image, page_num, text, layout_html)
+    if _DETECT_DIAGRAMS and text and _should_detect(text, layout_html):
+        dets, page_size = _detect_diagrams(b64_image, page_num)
+        text, layout_html = _merge_diagram_boxes(
+            text, layout_html, dets, page_size)
+    text, layout_html = _translate_residual_scripts(
+        page_num, text, layout_html)
     if layout_html:
         layout_html = _wrap_uncertain(layout_html)
     return text, layout_html, layout_error
