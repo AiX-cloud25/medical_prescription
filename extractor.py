@@ -92,7 +92,8 @@ Your entire output must contain ONLY English/Roman letters, digits and
 punctuation. Never output Kannada, Devanagari/Hindi, Tamil, Telugu or
 any other script anywhere — translate (or transliterate names) instead.
 Never convert one Indian script into another (e.g. Kannada text must
-never come out as Hindi/Devanagari).
+never come out as Hindi/Devanagari). Never output Chinese, Japanese or
+Korean characters — these are decoding errors, not page content.
 
 --------------------------------------
 PAGE TYPE — CHOOSE THE RIGHT FORMAT
@@ -272,6 +273,8 @@ Handwritten "C/o" at the start of a complaint line is often misread as
 "y/o", "yo" or "40" — when a line begins a complaint, prefer C/o.
 ECOG is a performance status (e.g. ECOG-2) — never transcribe it as
 "ECG-2" when written beside a general-examination note.
+A small hand-drawn triangle (Δ / delta) is clinical shorthand — output
+it as text on its line (use "Δ"); it is never a diagram or image.
 
 --------------------------------------
 TNM / STAGE GRIDS
@@ -949,6 +952,30 @@ def _bbox_iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
+def _bbox_ios(a, b):
+    """Intersection over the SMALLER box's area — a box nested inside a
+    bigger one scores ~1.0 here even when the IoU is low."""
+    ix = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    smaller = min(a[2] * a[3], b[2] * b[3])
+    return inter / smaller if smaller > 0 else 0.0
+
+
+def _same_region(a, b) -> bool:
+    """Two boxes describe the same drawing: solid overlap OR nesting."""
+    return _bbox_iou(a, b) > 0.5 or _bbox_ios(a, b) > 0.55
+
+
+def _union_box(a, b):
+    """Covering rect of two (x, y, w, h) boxes."""
+    x = min(a[0], b[0])
+    y = min(a[1], b[1])
+    r = max(a[0] + a[2], b[0] + b[2])
+    btm = max(a[1] + a[3], b[1] + b[3])
+    return (x, y, r - x, btm - y)
+
+
 def _crop_style_for_box(x, y, w, h) -> str:
     """
     Inline style that mirrors the drawing's position on the original page:
@@ -1013,8 +1040,9 @@ def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
             if box is None:
                 return _keep_or_drop(tag)
             x, y, w, h = box
-            # Duplicate tag for the same region (model repeats a drawing).
-            if any(_bbox_iou(box, prev) > 0.8 for prev in injected):
+            # Duplicate tag for the same region (model repeats a drawing,
+            # or emits a nested box of an already-embedded one).
+            if any(_same_region(box, prev) for prev in injected):
                 return ""
             left = max(0, int((x - _CROP_PAD_PCT) / 100 * pw))
             top = max(0, int((y - _CROP_PAD_PCT) / 100 * ph))
@@ -1135,7 +1163,9 @@ _LOCAL_RULES = (
     "Roman letters, never translated as ordinary words. Uncertain "
     "translations still get (?). Your output must contain ONLY "
     "English/Roman characters — never any Kannada, Devanagari, Tamil or "
-    "other script, and never one Indian script converted into another.\n"
+    "other script, never one Indian script converted into another, and "
+    "never Chinese/Japanese/Korean characters (those are decoding "
+    "errors, not page content).\n"
 )
 
 # Commands appended to the USER message — processed last before generation.
@@ -1157,7 +1187,9 @@ _LOCAL_USER_RULES = (
     "- Hand-drawn clinical drawings (and ONLY those — no logos, emblems, "
     "barcodes, QR codes) each have one <img class=\"cut\" "
     "data-bbox=\"X,Y,W,H\"> tag in the HTML section, at their "
-    "reading-order position, with percentage coordinates.\n"
+    "reading-order position, with percentage coordinates. Small "
+    "shorthand symbols — triangle/Δ, arrows, ticks, circled numbers — "
+    "are TEXT, never img.cut.\n"
     "- Every (?) word is wrapped in <span class=\"unc\"> in the HTML section.\n"
     "- (Circled) used ONLY with clear visual evidence; when unsure, leave "
     "the item unmarked.\n"
@@ -1570,7 +1602,7 @@ def read_page(
     b64_image: str,
     page_num: int,
     mime: str = "image/jpeg",
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, str | None, str | None, set]:
     """
     Extracts a single medical-record page.
 
@@ -1582,8 +1614,10 @@ def read_page(
     - Recognition of '(Circle If Positive)' checklists
 
     Returns:
-        (extracted_text, layout_html, layout_error)
-        The extracted text is mandatory.
+        (extracted_text, layout_html, layout_error, quality_flags)
+        The extracted text is mandatory. quality_flags records anomalies
+        seen during the read (e.g. "cjk" = a CJK-garbage output occurred
+        on some attempt) so the caller can force extra recovery passes.
         A text-only fallback is automatically used when the
         combined extraction cannot produce a reliable transcript.
 
@@ -1604,13 +1638,16 @@ def read_page(
     except Exception as e:
         print(f"[WARNING] Spelling-corrections lookup skipped (DB unavailable?): {e}")
 
+    quality_flags = set()
     last_err = None
     compact_nudge = ""
+    cjk_nudge = ""
     for attempt in range(4):
         try:
             raw, done_reason = _ollama_chat(
                 system_prompt,
-                _PAGE_USER.format(page=page_num) + _LOCAL_USER_RULES + compact_nudge,
+                _PAGE_USER.format(page=page_num) + _LOCAL_USER_RULES
+                + compact_nudge + cjk_nudge,
                 [b64_image],
                 _PAGE_MAX_TOKENS,
             )
@@ -1626,12 +1663,31 @@ def read_page(
                     time.sleep(3)
                     continue
 
+            # CJK characters = decode glitch, never real page content on
+            # these documents. At temperature 0 a bare retry reproduces
+            # the same output, so nudge the prompt to change the sample.
+            if text and _cjk_garbage(text + (layout or "")):
+                quality_flags.add("cjk")
+                print(f"[WARNING] Page {page_num}: output contains "
+                      f"Chinese/Japanese garbage, attempt {attempt + 1}/4")
+                cjk_nudge = (
+                    " Your previous output contained Chinese/Japanese "
+                    "characters — that was a decoding error. Re-read the "
+                    "page and output English/Roman characters ONLY."
+                )
+                if attempt < 3:
+                    time.sleep(3)
+                    continue
+                # Last attempt still garbled — fall through to the
+                # text-only fallback below for an independent chance.
+                text, layout = None, None
+
             if text:
                 if layout:
                     layout = _unhw_letterhead(text, layout)
                     text = _clean_checklist_sections(text)
                     layout = _clean_checklist_html(layout)
-                    return text, _sanitize_html(layout), None
+                    return text, _sanitize_html(layout), None, quality_flags
                 # Combined call gave text but no layout section.
                 print(f"[INFO] Page {page_num}: combined output had no layout "
                       f"section — running dedicated layout call.")
@@ -1641,7 +1697,7 @@ def read_page(
                     layout_html = _raw_text_to_html(text)
                 layout_html = _unhw_letterhead(text, layout_html)
                 layout_html = _clean_checklist_html(layout_html)
-                return text, _sanitize_html(layout_html), None
+                return text, _sanitize_html(layout_html), None, quality_flags
             print(f"[WARNING] Page {page_num} combined read empty/unusable, attempt {attempt + 1}/4")
             if attempt < 3:
                 time.sleep(3)
@@ -1655,10 +1711,14 @@ def read_page(
     # so fall back to the proven text-only call (raises on total failure).
     print(f"[WARNING] Page {page_num}: combined call failed ({last_err}); falling back to text-only call")
     text = read_prescription_image(b64_image, page_num, mime)
+    if _cjk_garbage(text):
+        # Something beats nothing — keep it, but leave the flag set so
+        # the translate and verify passes still run on this page.
+        quality_flags.add("cjk")
     text = _clean_checklist_sections(text)
     layout_html = _raw_text_to_html(text)
     layout_html = _clean_checklist_html(layout_html)
-    return text, _sanitize_html(layout_html), None
+    return text, _sanitize_html(layout_html), None, quality_flags
 
 
 # Structured-fields calls attach at most this many page images per call;
@@ -1829,19 +1889,40 @@ _VERIFY_USER = (
 )
 
 
-# ── Residual regional-script translation ─────────────────────────────
-# Safety net for the LANGUAGE prompt rules: if any Indic-script text
-# still made it into the output, translate the leftover fragments with
-# one text-only model call. Covers Devanagari through Malayalam
-# (U+0900-U+0D7F), which includes Kannada, Hindi, Tamil, Telugu.
-_INDIC_RUN_RX = re.compile(r"[ऀ-ൿ]+(?:[^\S\n]+[ऀ-ൿ]+)*")
+# ── Residual non-Latin script translation ────────────────────────────
+# Safety net for the LANGUAGE prompt rules: if any non-Latin text still
+# made it into the output, translate/clean the leftover fragments with
+# one text-only model call. Covers Indic scripts (U+0900-U+0D7F:
+# Devanagari through Malayalam, incl. Kannada/Hindi/Tamil/Telugu) plus
+# CJK (Chinese/Japanese/Korean — those are Qwen decode glitches, not
+# page content, and get deleted rather than translated).
+_NONLATIN_CHARS = (
+    "ऀ-ൿ"                     # Indic: U+0900-U+0D7F
+    "　-〿぀-ヿㇰ-ㇿ"   # CJK punct + kana
+    "㐀-䶿一-鿿豈-﫿"   # CJK ideographs
+    "･-ﾟ가-힯"                # halfwidth kana + hangul
+)
+_NONLATIN_RUN_RX = re.compile(
+    rf"[{_NONLATIN_CHARS}]+(?:[^\S\n]+[{_NONLATIN_CHARS}]+)*")
+
+# CJK-only detector for the garbage gate in read_page.
+_CJK_RX = re.compile(
+    r"[　-〿぀-ヿㇰ-ㇿ㐀-䶿"
+    r"一-鿿豈-﫿･-ﾟ가-힯]")
+
+
+def _cjk_garbage(text: str) -> bool:
+    """True when the text carries enough CJK to indicate a decode glitch."""
+    return len(_CJK_RX.findall(text or "")) >= 3
+
 
 _TRANSLATE_SYSTEM = (
-    "You translate fragments of Indian regional-script text found in a "
-    "medical document into English. Translate the MEANING into natural "
-    "English; if a fragment is a person/place/facility name, transliterate "
-    "it into Roman letters instead of translating. Append (?) to uncertain "
-    "words. Output ONLY JSON: "
+    "You translate fragments of regional-script or Chinese/Japanese text "
+    "found in a medical document into English. Translate the MEANING into "
+    "natural English; if a fragment is a person/place/facility name, "
+    "transliterate it into Roman letters instead of translating. Append "
+    "(?) to uncertain words. If a fragment is meaningless OCR noise with "
+    'no recoverable meaning, output "" for it. Output ONLY JSON: '
     '{"translations": [{"original": "<fragment exactly as given>", '
     '"english": "<English text>"}]} — one entry per fragment, same order.'
 )
@@ -1857,7 +1938,7 @@ def _translate_residual_scripts(page_num: int, text: str,
     try:
         combined = (text or "") + "\n" + (layout_html or "")
         frags = []
-        for m in _INDIC_RUN_RX.finditer(combined):
+        for m in _NONLATIN_RUN_RX.finditer(combined):
             frag = m.group(0).strip()
             if frag and frag not in frags:
                 frags.append(frag)
@@ -1878,7 +1959,8 @@ def _translate_residual_scripts(page_num: int, text: str,
                 continue
             orig = str(e.get("original") or "").strip()
             eng = str(e.get("english") or "").strip()
-            if not orig or not eng or _INDIC_RUN_RX.search(eng):
+            # eng == "" means the fragment is OCR noise — delete it.
+            if not orig or _NONLATIN_RUN_RX.search(eng):
                 continue
             replaced = False
             if text and orig in text:
@@ -1889,8 +1971,8 @@ def _translate_residual_scripts(page_num: int, text: str,
                 replaced = True
             if replaced:
                 applied += 1
-        print(f"[INFO] Page {page_num}: translated {applied}/{len(frags)} "
-              f"residual regional-script fragment(s)")
+        print(f"[INFO] Page {page_num}: translated/cleaned "
+              f"{applied}/{len(frags)} residual non-Latin fragment(s)")
         return text, layout_html
     except Exception as e:
         print(f"[WARNING] Page {page_num}: residual-script translation "
@@ -2011,14 +2093,25 @@ def _verify_completeness(b64_image: str, page_num: int, text: str,
 # tags, deletes unconfirmed ones, and inserts tags for missed drawings
 # anchored beside their own handwritten annotations.
 _DIAGRAM_SYSTEM = (
-    "You locate hand-drawn clinical drawings on ONE medical document page. "
-    "Report ONLY drawings made by hand with a pen: anatomy sketches "
-    "(breast, abdomen, limbs, organs), lesion/tumour maps, marked-up body "
-    "outlines, freehand clinical illustrations — including small or faint "
-    "ones. NEVER report: hospital/clinic logos, letterhead emblems, "
-    "medical symbols (caduceus, cross), barcodes, QR codes, stamps, "
-    "signatures, watermarks, printed graphics or charts, photographs, or "
-    "plain handwritten text without a drawing. "
+    "You locate hand-drawn clinical DRAWINGS on ONE medical document page. "
+    "A drawing is a pen-drawn FIGURE built from NON-LETTER SHAPES: an "
+    "anatomy outline (breast, chest, abdomen, limb, organ), a "
+    "lesion/tumour map, circles or ovals drawn to represent organs or "
+    "masses, a marked-up body outline, a freehand clinical illustration — "
+    "including small or faint ones. Handwritten labels inside or beside "
+    "such a figure are part of it.\n"
+    "NEVER report:\n"
+    "- handwritten words, sentences, numbers or lab values — even messy, "
+    "slanted, crossed-out or hard-to-read handwriting is TEXT, not a "
+    "drawing\n"
+    "- small shorthand symbols: a triangle/delta, arrows, ticks/check "
+    "marks, circled words or numbers, brackets, underlines, plus/minus "
+    "signs\n"
+    "- hospital/clinic logos, letterhead emblems, medical symbols "
+    "(caduceus, cross), barcodes, QR codes, stamps, signatures, "
+    "watermarks, printed graphics or charts, photographs.\n"
+    "If a region contains only letters, digits and punctuation, it is NOT "
+    "a drawing.\n"
     'Output ONLY JSON: {"diagrams": [{"bbox": [x, y, w, h], '
     '"description": "<what the drawing shows>", '
     '"labels": "<handwritten words inside or next to the drawing>"}]}. '
@@ -2029,6 +2122,63 @@ _DIAGRAM_SYSTEM = (
 
 _DIAGRAM_USER = ("Find every hand-drawn clinical drawing on this page "
                  "and return the JSON now.")
+
+# Second opinion on each candidate box: crop it and ask what it contains.
+# Classifying a small crop is far easier than grounding, so this reliably
+# rejects handwriting/symbol regions the detector mistook for drawings.
+_DIAGRAM_VERIFY_SYSTEM = (
+    "You classify ONE cropped region of a medical document page. "
+    "Answer with exactly one category:\n"
+    "drawing — the crop contains a hand-drawn clinical figure: an anatomy "
+    "outline (breast, chest, abdomen, limb, organ), a lesion or tumour "
+    "map, circles/ovals drawn to represent organs or masses, a marked-up "
+    "body outline, or any pen figure made of non-letter shapes, however "
+    "rough. Handwritten labels around or inside the figure do not change "
+    "the answer.\n"
+    "text — the crop contains only handwriting or printed text: words, "
+    "sentences, numbers, lab values — even messy, slanted or "
+    "crossed-out.\n"
+    "symbol — the crop contains only a small shorthand mark: a "
+    "triangle/delta, arrow, tick, circled word or number, bracket, "
+    "underline, or plus/minus sign.\n"
+    'Output ONLY JSON: {"verdict": "drawing" | "text" | "symbol"}.'
+)
+_DIAGRAM_VERIFY_USER = "Classify this cropped region and return the JSON now."
+_VERIFY_CROP_PAD_PCT = 2.0
+_VERIFY_CROP_MAX_EDGE = 512
+
+
+def _verify_diagram_crop(img, box, page_num: int):
+    """
+    Crop `box` (percent) out of the page image and ask the model what it
+    contains. Returns "drawing" / "text" / "symbol", or None on any
+    failure (caller fails open). Never raises.
+    """
+    try:
+        pw, ph = img.size
+        x, y, w, h = box
+        left = max(0, int((x - _VERIFY_CROP_PAD_PCT) / 100 * pw))
+        top = max(0, int((y - _VERIFY_CROP_PAD_PCT) / 100 * ph))
+        right = min(pw, int((x + w + _VERIFY_CROP_PAD_PCT) / 100 * pw))
+        bottom = min(ph, int((y + h + _VERIFY_CROP_PAD_PCT) / 100 * ph))
+        if right - left < 4 or bottom - top < 4:
+            return None
+        crop = img.crop((left, top, right, bottom))
+        scale = _VERIFY_CROP_MAX_EDGE / max(crop.size)
+        if scale < 1:
+            crop = crop.resize((max(1, int(crop.size[0] * scale)),
+                                max(1, int(crop.size[1] * scale))))
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=80)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        raw, _ = _ollama_chat(_DIAGRAM_VERIFY_SYSTEM, _DIAGRAM_VERIFY_USER,
+                              [b64], 120, json_mode=True)
+        verdict = str((_parse_json_loose(raw) if raw else {})
+                      .get("verdict") or "").strip().lower()
+        return verdict if verdict in ("drawing", "text", "symbol") else None
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: crop verification error ({e})")
+        return None
 
 
 def _esc_attr(s: str) -> str:
@@ -2044,11 +2194,12 @@ def _detect_diagrams(b64_image: str, page_num: int) -> tuple:
     failed. Never raises.
     """
     page_size = None
+    img = None
     try:
         img = Image.open(io.BytesIO(base64.b64decode(b64_image)))
         page_size = img.size
     except Exception:
-        pass
+        img = None
     pw, ph = page_size if page_size else (1000, 1414)
     last_err = None
     for attempt in range(2):
@@ -2076,7 +2227,13 @@ def _detect_diagrams(b64_image: str, page_num: int) -> tuple:
                 desc = str(e.get("description") or "").strip()
                 if _LOGO_ALT_RX.search(desc):
                     continue
-                if any(_bbox_iou(box, d["box"]) > 0.8 for d in dets):
+                # Same drawing reported twice (overlapping or nested
+                # boxes): merge into one covering box instead of keeping
+                # both.
+                dup = next((d for d in dets
+                            if _same_region(box, d["box"])), None)
+                if dup is not None:
+                    dup["box"] = _union_box(dup["box"], box)
                     continue
                 dets.append({
                     "box": box,
@@ -2085,6 +2242,23 @@ def _detect_diagrams(b64_image: str, page_num: int) -> tuple:
                 })
                 if len(dets) >= _DIAGRAM_MAX_PER_PAGE:
                     break
+            # Second opinion: crop each candidate and ask what it is —
+            # rejects handwriting/symbol regions the grounding call
+            # mistook for drawings. Fails open on verification errors.
+            if img is not None and dets:
+                kept = []
+                for d in dets:
+                    verdict = _verify_diagram_crop(img, d["box"], page_num)
+                    if verdict in ("text", "symbol"):
+                        print(f"[INFO] Page {page_num}: diagram candidate "
+                              f"rejected by crop check (verdict={verdict}, "
+                              f"box={d['box']})")
+                        continue
+                    if verdict is None:
+                        print(f"[WARNING] Page {page_num}: crop check "
+                              f"inconclusive — keeping candidate")
+                    kept.append(d)
+                dets = kept
             print(f"[INFO] Page {page_num}: diagram detector found "
                   f"{len(dets)} drawing(s)")
             return dets, page_size
@@ -2161,12 +2335,20 @@ def _merge_diagram_boxes(text: str, layout_html: str, dets,
                 layout_html = layout_html[:m.start()] + layout_html[m.end():]
 
         # Missed drawings: insert new tags anchored near their labels.
+        # `placed` tracks every box already present (matched tags and
+        # fresh inserts) so a second detection of the same drawing can
+        # never produce a duplicate crop.
+        placed = [dets[i]["box"] for i in consumed]
         lines = text.splitlines() if text else []
         line_tok = [set(re.findall(r"[a-z0-9]+", ln.lower()))
                     for ln in lines]
         inserted = 0
         for i, d in enumerate(dets):
             if i in consumed:
+                continue
+            if any(_same_region(d["box"], p) for p in placed):
+                print(f"[INFO] diagram det skipped: duplicates an "
+                      f"already-placed box {d['box']}")
                 continue
             x, y, w, h = d["box"]
             desc = _esc_attr(d["desc"]) or "hand-drawn diagram"
@@ -2205,6 +2387,7 @@ def _merge_diagram_boxes(text: str, layout_html: str, dets,
                 if not has_marker:
                     lines.append(marker)
                     line_tok.append(set())
+            placed.append(d["box"])
             inserted += 1
         if inserted and lines:
             text = "\n".join(lines)
@@ -2224,24 +2407,110 @@ def _should_detect(text: str, layout_html: str) -> bool:
         r'class\s*=\s*["\'][^"\']*\bcut\b', layout_html))
 
 
+# ── Sparse-page rescue ───────────────────────────────────────────────
+# When a page comes back essentially empty, the most common cause is a
+# rotation the orientation probe missed. Outcome-triggered: retry the
+# text-only read on rotated copies and keep the first useful result.
+_RESCUE_MIN_LINES = 3
+
+
+def _rescue_sparse_page(b64_image: str, page_num: int):
+    """
+    Try 90/270/180 rotations, one text-only read each. Returns
+    (text, rotated_b64) for the first rotation yielding at least
+    _RESCUE_MIN_LINES non-blank lines, else None. Never raises.
+    """
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(b64_image)))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: rescue decode failed ({e})")
+        return None
+    for deg in (90, 270, 180):
+        try:
+            rotated = img.rotate(-deg, expand=True)
+            buf = io.BytesIO()
+            rotated.save(buf, format="JPEG", quality=90, optimize=True)
+            rb64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            raw, _ = _ollama_chat(
+                _READ_SYSTEM + _LOCAL_RULES,
+                _READ_USER.format(page=page_num) + _LOCAL_USER_RULES,
+                [rb64],
+                _VISION_MAX_TOKENS,
+            )
+            lines = sum(1 for ln in (raw or "").splitlines() if ln.strip())
+            if lines >= _RESCUE_MIN_LINES:
+                print(f"[INFO] Page {page_num}: sparse output rescued by "
+                      f"{deg}° rotation ({lines} lines)")
+                return raw, rb64
+            print(f"[INFO] Page {page_num}: rescue rotation {deg}° gave "
+                  f"only {lines} line(s)")
+        except Exception as e:
+            print(f"[WARNING] Page {page_num}: rescue rotation {deg}° "
+                  f"failed ({e})")
+    return None
+
+
+# ── Deterministic shorthand repair ───────────────────────────────────
+# The model keeps misreading handwritten "C/o" (Complains of) at the
+# start of complaint lines as "yo"/"y/o"/"4o" despite prompt guidance.
+# Line-start anchoring keeps "45 y/o female" (age) safe, and plain "40"
+# is deliberately excluded so dosages are never touched.
+_SHORTHAND_LINE_RX = re.compile(r"(?im)^(?:y/o|yo|4o)\b(?=[ \t]+\S)")
+_SHORTHAND_HTML_RX = re.compile(
+    r'(?is)(<span[^>]*\bclass\s*=\s*"[^"]*\bhw\b[^"]*"[^>]*>\s*)'
+    r'(?:y/o|yo|4o)\b(?=[ \t]+\S)')
+
+
+def _fix_shorthand(text: str) -> str:
+    return _SHORTHAND_LINE_RX.sub("C/o", text) if text else text
+
+
+def _fix_shorthand_html(html: str) -> str:
+    return _SHORTHAND_HTML_RX.sub(r"\1C/o", html) if html else html
+
+
 def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     """
-    read_page + optional missed-line verification + diagram detection +
-    residual-script translation + unc wrapping.
+    read_page + sparse-page rescue + missed-line verification + diagram
+    detection + shorthand repair + residual-script translation + unc
+    wrapping.
+
+    Returns (text, layout_html, layout_error, effective_b64) —
+    effective_b64 is the page image every produced bbox refers to (it
+    differs from the input only when the rescue rotated the page), and
+    MUST be the image crops are cut from.
     """
-    text, layout_html, layout_error = read_page(b64_image, page_num, mime)
-    if _VERIFY and text and _page_has_handwriting(text, layout_html):
+    text, layout_html, layout_error, quality_flags = read_page(
+        b64_image, page_num, mime)
+
+    # Essentially-empty page: most likely a rotation the orientation
+    # probe missed — retry rotated before any downstream pass.
+    nonblank = sum(1 for ln in (text or "").splitlines() if ln.strip())
+    if nonblank < _RESCUE_MIN_LINES:
+        rescued = _rescue_sparse_page(b64_image, page_num)
+        if rescued:
+            text, b64_image = rescued
+            text = _clean_checklist_sections(text)
+            layout_html = _sanitize_html(_raw_text_to_html(text))
+            layout_error = None
+
+    if _VERIFY and text and ("cjk" in quality_flags
+                             or _page_has_handwriting(text, layout_html)):
         text, layout_html = _verify_completeness(
             b64_image, page_num, text, layout_html)
     if _DETECT_DIAGRAMS and text and _should_detect(text, layout_html):
         dets, page_size = _detect_diagrams(b64_image, page_num)
         text, layout_html = _merge_diagram_boxes(
             text, layout_html, dets, page_size)
+    text = _fix_shorthand(text)
+    layout_html = _fix_shorthand_html(layout_html)
     text, layout_html = _translate_residual_scripts(
         page_num, text, layout_html)
     if layout_html:
         layout_html = _wrap_uncertain(layout_html)
-    return text, layout_html, layout_error
+    return text, layout_html, layout_error, b64_image
 
 
 def extract(data: bytes, ext: str) -> tuple:
@@ -2283,13 +2552,16 @@ def extract(data: bytes, ext: str) -> tuple:
 
         pages = []
         for n, b64, _ in rendered:
-            text, layout_html, layout_error = page_futs[n].result()  # ExtractorError propagates
+            # ExtractorError propagates. effective_b64 is the image every
+            # bbox refers to — it differs from b64 only when the sparse-
+            # page rescue rotated the page, and crops MUST be cut from it.
+            text, layout_html, layout_error, effective_b64 = \
+                page_futs[n].result()
             if layout_html:
-                # Cut the real stamps/signatures/diagrams out of the page
-                # image and embed them where the model marked data-bbox.
-                # b64 is the (possibly rotation-corrected) image the model
-                # actually saw, so its bbox coordinates match this image.
-                layout_html = _embed_region_crops(layout_html, base64.b64decode(b64))
+                # Cut the real drawings out of the page image and embed
+                # them where the detector/model marked data-bbox.
+                layout_html = _embed_region_crops(
+                    layout_html, base64.b64decode(effective_b64))
             pages.append({
                 "page": n,
                 "text": text,
