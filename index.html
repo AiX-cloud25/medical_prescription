@@ -161,7 +161,7 @@
               <p className="text-red-600 text-sm px-6 py-5">{state.error}</p>
             ) : state.entries.length === 0 ? (
               <p className="text-ink-soft text-sm italic px-6 py-5">
-                No learned corrections yet — fix a word in the Raw Text tab and save, and it will appear here.
+                No learned corrections yet — click Edit on the Review page, fix a word in the layout and save, and it will appear here.
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -370,22 +370,152 @@
         "td, th { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 12px; }" +
         ".hw { font-family: inherit; color: inherit; }" +
         ".stamp { display: inline-block; border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; transform: rotate(-2deg); margin: 2px; }" +
-        ".unc { background: #fef9c3; }" +
+        ".unc { background: #fde047; outline: 1.5px solid #f59e0b; border-radius: 3px; padding: 0 2px; font-weight: 600; }" +
         "img.cut { max-width: 100%; height: auto; border-radius: 4px; }" +
         "img.cut:not([src]) { border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; min-height: 18px; }" +
         "</style></head><body>" + fragment + "</body></html>"
       );
     }
 
-    function LayoutFrame({ html }) {
+    function LayoutFrame({ html, editable, frameRef, keyActionsRef }) {
+      // View mode: fully sandboxed (no scripts, no same-origin access).
+      // Edit mode: allow-same-origin ONLY — still no allow-scripts, and the
+      // CSP (default-src 'none') keeps blocking scripts/network inside the
+      // frame; the parent needs same-origin just to reach contentDocument.
       return (
         <iframe
-          sandbox=""
+          key={editable ? "edit" : "view"}
+          ref={frameRef || undefined}
+          sandbox={editable ? "allow-same-origin" : ""}
           srcDoc={buildLayoutDoc(html)}
+          onLoad={() => {
+            if (!editable || !frameRef || !frameRef.current) return;
+            try {
+              const idoc = frameRef.current.contentDocument;
+              if (!idoc || !idoc.body) return;
+              idoc.body.contentEditable = "true";
+              idoc.body.spellcheck = false;
+              idoc.body.style.outline = "none";
+              idoc.body.focus();
+              idoc.addEventListener("keydown", (e) => {
+                const acts = (keyActionsRef && keyActionsRef.current) || {};
+                if (e.key === "Escape" && acts.cancel) { e.preventDefault(); acts.cancel(); }
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && acts.save) { e.preventDefault(); acts.save(); }
+              });
+            } catch (err) { /* editing unavailable — Save will report it */ }
+          }}
           title="reconstructed layout"
-          className="w-full h-[480px] bg-white rounded-lg border border-line"
+          className={
+            "w-full h-[480px] bg-white rounded-lg border " +
+            (editable ? "border-amber-400 ring-2 ring-amber-200" : "border-line")
+          }
         />
       );
+    }
+
+    /* ── Edit-in-layout helpers ───────────────────────────────── */
+
+    // Re-sanitize user-edited layout HTML before storing it (DOMParser
+    // never executes scripts; the server sanitized the original already).
+    function sanitizeFragment(html) {
+      const doc = new DOMParser().parseFromString("<div>" + (html || "") + "</div>", "text/html");
+      doc.querySelectorAll("script,style,iframe,object,embed,link,meta,form,input,select,textarea,button").forEach((el) => el.remove());
+      doc.body.querySelectorAll("*").forEach((el) => {
+        Array.from(el.attributes).forEach((at) => {
+          const n = at.name.toLowerCase();
+          const v = String(at.value || "").trim().toLowerCase();
+          if (n.startsWith("on") || v.startsWith("javascript:")) el.removeAttribute(at.name);
+          else if ((n === "src" || n === "href") && !v.startsWith("data:image/")) el.removeAttribute(at.name);
+        });
+      });
+      const wrap = doc.body.firstElementChild;
+      return (wrap ? wrap.innerHTML : doc.body.innerHTML).trim();
+    }
+
+    // Visible-text tokens of a layout fragment, in reading order.
+    function htmlTokens(html) {
+      const doc = new DOMParser().parseFromString("<div>" + (html || "") + "</div>", "text/html");
+      const parts = [];
+      (function walk(node) {
+        node.childNodes.forEach((c) => {
+          if (c.nodeType === 3) parts.push(c.nodeValue);
+          else if (c.nodeType === 1) { parts.push(" "); walk(c); parts.push(" "); }
+        });
+      })(doc.body);
+      return parts.join(" ").split(/\s+/).filter(Boolean);
+    }
+
+    // LCS diff between two token lists → word-level opcodes. Only small,
+    // targeted edits are kept (spans ≤ 4 tokens — mirrors the server's
+    // _MAX_DIFF_TOKENS) so a reflowed line never produces a giant replace.
+    function tokenDiff(a, b) {
+      const n = a.length, m = b.length, W = m + 1;
+      const dp = new Int32Array((n + 1) * W);
+      for (let i = n - 1; i >= 0; i--)
+        for (let j = m - 1; j >= 0; j--)
+          dp[i * W + j] = a[i] === b[j]
+            ? dp[(i + 1) * W + j + 1] + 1
+            : Math.max(dp[(i + 1) * W + j], dp[i * W + j + 1]);
+      const ops = [];
+      let i = 0, j = 0, di = 0, dj = 0;
+      const flush = (i2, j2) => {
+        if (di === i2 && dj === j2) return;
+        ops.push({
+          op: di === i2 ? "insert" : dj === j2 ? "delete" : "replace",
+          pred: a.slice(di, i2),
+          corr: b.slice(dj, j2),
+          anchor: a.slice(Math.max(0, di - 4), di),
+        });
+      };
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { flush(i, j); i++; j++; di = i; dj = j; }
+        else if (dp[(i + 1) * W + j] >= dp[i * W + j + 1]) i++;
+        else j++;
+      }
+      flush(n, m);
+      return ops.filter((op) => op.pred.length <= 4 && op.corr.length <= 4);
+    }
+
+    // Replay layout-edit opcodes onto plain text (raw_text). Anchor-first,
+    // like the server's _patch_words: locate the unchanged tokens before
+    // the edit, then apply within a 300-char window. Unlocatable ops are
+    // skipped. startAt limits the search to the edited page's region.
+    function applyOpsToText(text, ops, startAt) {
+      const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const joinRx = (toks) => toks.map(esc).join("\\s+");
+      const base = Math.max(0, startAt || 0);
+      let out = text;
+      ops.forEach((op) => {
+        const corr = op.corr.join(" ");
+        let from = base, anchored = false;
+        for (let k = 0; k < op.anchor.length; k++) {
+          const m = out.slice(base).match(new RegExp(joinRx(op.anchor.slice(k)), "i"));
+          if (m) { from = base + m.index + m[0].length; anchored = true; break; }
+        }
+        if (op.op === "insert") {
+          if (!anchored) return; // nowhere safe to put new text
+          out = out.slice(0, from) + " " + corr + out.slice(from);
+          return;
+        }
+        const windowStr = out.slice(from, from + 300);
+        let s = -1, e = -1;
+        const pm = windowStr.match(new RegExp(joinRx(op.pred), "i"));
+        if (pm) { s = from + pm.index; e = s + pm[0].length; }
+        else {
+          const gm = out.slice(base).match(new RegExp("(?<![A-Za-z0-9])" + joinRx(op.pred) + "(?![A-Za-z0-9])", "i"));
+          if (!gm) return;
+          s = base + gm.index; e = s + gm[0].length;
+        }
+        if (op.op === "delete") {
+          // Swallow one adjacent space so deletions don't leave doubles.
+          if (out[e] === " ") e++;
+          else if (out[s - 1] === " ") s--;
+          out = out.slice(0, s) + out.slice(e);
+        } else {
+          out = out.slice(0, s) + corr + out.slice(e);
+        }
+      });
+      return out;
     }
 
     function fieldByKey(fields, key) {
@@ -604,18 +734,22 @@
     function ExtractionCard({ doc, onRawTextSaved, onRawTextReverted }) {
       const { file, result, status } = doc;
       const [copied, setCopied] = useState(false);
-      const [tab, setTab] = useState("layout");
       const [pageIdx, setPageIdx] = useState(0);
       const [editing, setEditing] = useState(false);
-      const [draftText, setDraftText] = useState("");
       const [save, setSave] = useState({ status: "idle", msg: "" });
       const [pdfBusy, setPdfBusy] = useState(false);
       const [pdfNote, setPdfNote] = useState("");
+      const frameRef = useRef(null);
+      const keyActionsRef = useRef({});
       const url = React.useMemo(() => URL.createObjectURL(file), [file]);
       const isPdf = /\.pdf$/i.test(file.name);
       const meta = (result && result.meta) || {};
       const pages = (result && result.pages) || [];
-      const page = pages[Math.min(pageIdx, Math.max(pages.length - 1, 0))] || null;
+      const curIdx = Math.min(pageIdx, Math.max(pages.length - 1, 0));
+      const page = pages[curIdx] || null;
+      const uncCount = page && page.layout_html
+        ? (page.layout_html.match(/class="[^"]*\bunc\b[^"]*"/g) || []).length
+        : 0;
 
       const copy = async () => {
         try {
@@ -628,35 +762,61 @@
       const done = status === "processed";
 
       function startEdit() {
-        setDraftText((result && result.raw_text) || "");
         setSave({ status: "idle", msg: "" });
         setEditing(true);
       }
 
-      async function saveRawEdit() {
+      function cancelEdit() {
+        setEditing(false);
+        setSave({ status: "idle", msg: "" });
+      }
+
+      async function saveLayoutEdit() {
+        if (!page) return;
+        const idoc = frameRef.current && frameRef.current.contentDocument;
+        if (!idoc || !idoc.body) {
+          setSave({ status: "error", msg: "Could not read the edited layout — please try again." });
+          return;
+        }
         setSave({ status: "saving", msg: "Saving…" });
         try {
+          const editedHtml = sanitizeFragment(idoc.body.innerHTML);
+          const ops = tokenDiff(htmlTokens(page.layout_html || ""), htmlTokens(editedHtml));
+          const rawText = (result && result.raw_text) || "";
+          // Search only inside this page's region of the document text.
+          const marker = pages.length > 1 ? rawText.indexOf(`--- Page ${page.page} ---`) : 0;
+          const newDocText = applyOpsToText(rawText, ops, Math.max(0, marker));
+          const newPageText = applyOpsToText(page.text || "", ops, 0);
+
+          if (newDocText === rawText) {
+            // Visual-only change (e.g. removed an image) or nothing located
+            // to update — keep the edit for this session, nothing to learn.
+            onRawTextSaved(doc.id, rawText, [], { pageIdx: curIdx, html: editedHtml, text: page.text });
+            setEditing(false);
+            setSave({ status: "saved", msg: "Layout updated for this session — no text changed, so no correction was saved." });
+            return;
+          }
+
           const res = await fetch(api("/api/raw-feedback"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               doc_hash: result.doc_hash,
               filename: file.name,
-              original_text: result.raw_text || "",
-              corrected_text: draftText,
+              original_text: rawText,
+              corrected_text: newDocText,
             }),
           });
           const body = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
-          onRawTextSaved(doc.id, draftText, body.pairs || []);
+          onRawTextSaved(doc.id, newDocText, body.pairs || [], { pageIdx: curIdx, html: editedHtml, text: newPageText });
           setEditing(false);
           setSave({ status: "saved", msg: "Correction saved — re-uploading this file will show the corrected text." });
         } catch (e) {
           setSave({ status: "error", msg: String(e.message || e) });
         }
       }
-
-      const draftDirty = draftText !== ((result && result.raw_text) || "") && draftText.trim() !== "";
+      keyActionsRef.current = { save: saveLayoutEdit, cancel: cancelEdit };
 
       // Original transcription rebuilt from the page texts (the model output
       // of the last extraction) — fallback when the server has no stored one.
@@ -710,132 +870,101 @@
             </div>
           </div>
 
-          {/* Panel 2: reconstructed layout / raw text */}
+          {/* Panel 2: reconstructed layout (editable in place) */}
           <div className="bg-paper rounded-2xl shadow-card overflow-hidden flex flex-col">
             <div className="px-5 py-3.5 border-b border-line/60 flex items-center gap-2">
               <span className="material-symbols-outlined text-primary">description</span>
               <h3 className="text-ink font-semibold text-sm">Reconstructed Layout</h3>
               {done && (
                 <div className="ml-auto flex items-center gap-1">
-                  {tab === "raw" && !editing && (
+                  {!editing ? (
                     <React.Fragment>
                       <button
                         onClick={startEdit}
                         className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:text-primary-deep transition rounded-full border border-line px-3 py-1"
-                        title="Correct the extracted text — the fix is remembered for this document"
+                        title="Correct this page directly in the layout — the fix is remembered for this document"
                       >
                         <span className="material-symbols-outlined text-base">edit</span> Edit
                       </button>
                       <button
                         onClick={copy}
                         className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:text-primary-deep transition rounded-full border border-line px-3 py-1"
+                        title="Copy the extracted text of the whole document"
                       >
                         <span className="material-symbols-outlined text-base">{copied ? "check" : "content_copy"}</span>
                         {copied ? "Copied" : "Copy"}
                       </button>
                     </React.Fragment>
-                  )}
-                  <div className="flex rounded-full border border-line overflow-hidden text-xs font-medium">
-                    {[["layout", "Layout"], ["raw", "Raw Text"]].map(([k, label]) => (
+                  ) : (
+                    <React.Fragment>
                       <button
-                        key={k}
-                        onClick={() => setTab(k)}
-                        className={"px-3 py-1 transition " + (tab === k ? "bg-primary text-white" : "text-primary hover:bg-mint-2")}
+                        onClick={cancelEdit}
+                        disabled={save.status === "saving"}
+                        className="rounded-full border border-line text-ink-soft text-xs font-medium px-4 py-1 hover:bg-mint-2 transition disabled:opacity-40"
                       >
-                        {label}
+                        Cancel
                       </button>
-                    ))}
-                  </div>
+                      <button
+                        onClick={saveLayoutEdit}
+                        disabled={save.status === "saving"}
+                        className="rounded-full bg-primary text-white text-xs font-semibold px-4 py-1 transition hover:opacity-90 disabled:opacity-40 disabled:cursor-wait"
+                        title="Save your corrections (Ctrl+Enter)"
+                      >
+                        {save.status === "saving" ? "Saving…" : "Save"}
+                      </button>
+                    </React.Fragment>
+                  )}
                 </div>
               )}
             </div>
             <div className="flex-1 p-4 overflow-auto max-h-[560px]">
               {!done ? (
                 <PanelBusy status={status} error={doc.error} />
-              ) : tab === "raw" ? (
-                editing ? (
-                  <div>
-                    <textarea
-                      value={draftText}
-                      onChange={(e) => { setDraftText(e.target.value); setSave({ status: "idle", msg: "" }); }}
-                      spellCheck={false}
-                      className="w-full h-[440px] bg-mint/40 border border-line rounded-lg p-3 text-[13px] leading-6 text-ink font-sans focus:outline-none focus:border-primary resize-none"
-                    />
-                    <div className="flex items-center justify-end gap-2 mt-2">
-                      {save.msg && (
-                        <span className={"text-xs font-medium mr-auto " + (save.status === "error" ? "text-red-600" : "text-ink-soft")}>
-                          {save.msg}
-                        </span>
-                      )}
-                      <button
-                        onClick={() => setEditing(false)}
-                        className="rounded-full border border-line text-ink-soft text-xs font-medium px-4 py-1.5 hover:bg-mint-2 transition"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        disabled={!draftDirty || save.status === "saving"}
-                        onClick={saveRawEdit}
-                        className={
-                          "rounded-full bg-primary text-white text-xs font-semibold px-4 py-1.5 transition " +
-                          (draftDirty && save.status !== "saving" ? "hover:opacity-90" : "opacity-40 cursor-not-allowed")
-                        }
-                        title={draftDirty ? "Save the corrected text" : "Change the text first — only edits are saved"}
-                      >
-                        {save.status === "saving" ? "Saving…" : "Save Correction"}
-                      </button>
-                    </div>
-                  </div>
-                ) : result && result.raw_text ? (
-                  <div>
-                    {result.raw_text_corrected && (
-                      <div className="flex flex-wrap items-center gap-2 mb-2">
-                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
-                          <span className="material-symbols-outlined text-sm">verified</span> corrected version
-                        </span>
-                        <button
-                          disabled={save.status === "saving"}
-                          onClick={revertRaw}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600 border border-red-200 rounded-full px-3 py-1 hover:bg-red-50 transition disabled:opacity-40"
-                          title="Delete this correction and restore the original extracted text"
-                        >
-                          <span className="material-symbols-outlined text-sm">undo</span>
-                          {save.status === "saving" ? "Reverting…" : "Revert to original"}
-                        </button>
-                      </div>
-                    )}
-                    {result.autocorrections && result.autocorrections.length > 0 && (
-                      <p className="text-[11px] text-sky-700 bg-sky-50 border border-sky-200 rounded-full inline-flex px-3 py-1 mb-2 font-medium">
-                        Dictionary auto-corrections: {result.autocorrections.map((a) => `${a.from} → ${a.to}`).join(", ")}
-                      </p>
-                    )}
-                    {result.medgemma_corrections && result.medgemma_corrections.length > 0 && (
-                      <p className="text-[11px] text-violet-700 bg-violet-50 border border-violet-200 rounded-full inline-flex px-3 py-1 mb-2 font-medium">
-                        MedGemma corrected {result.medgemma_corrections.length} medical word{result.medgemma_corrections.length === 1 ? "" : "s"} (marked with *): {result.medgemma_corrections.map((a) => `${a.from} → ${a.to}`).join(", ")}
-                      </p>
-                    )}
-                    {save.status === "saved" && (
-                      <p className="text-xs text-emerald-600 font-medium mb-2">{save.msg}</p>
-                    )}
-                    {save.status === "error" && (
-                      <p className="text-xs text-red-600 font-medium mb-2">{save.msg}</p>
-                    )}
-                    <pre className="whitespace-pre-wrap break-words text-[13px] leading-6 text-ink font-sans">{result.raw_text}</pre>
-                  </div>
-                ) : (
-                  <p className="text-ink-soft text-sm italic">No text could be extracted from this file.</p>
-                )
               ) : (
                 <React.Fragment>
+                  {result && result.raw_text_corrected && !editing && (
+                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
+                        <span className="material-symbols-outlined text-sm">verified</span> corrected version
+                      </span>
+                      <button
+                        disabled={save.status === "saving"}
+                        onClick={revertRaw}
+                        className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600 border border-red-200 rounded-full px-3 py-1 hover:bg-red-50 transition disabled:opacity-40"
+                        title="Delete this correction and restore the original extracted text"
+                      >
+                        <span className="material-symbols-outlined text-sm">undo</span>
+                        {save.status === "saving" ? "Reverting…" : "Revert to original"}
+                      </button>
+                    </div>
+                  )}
+                  {result && result.autocorrections && result.autocorrections.length > 0 && (
+                    <p className="text-[11px] text-sky-700 bg-sky-50 border border-sky-200 rounded-full inline-flex px-3 py-1 mb-2 font-medium">
+                      Dictionary auto-corrections: {result.autocorrections.map((a) => `${a.from} → ${a.to}`).join(", ")}
+                    </p>
+                  )}
+                  {result && result.medgemma_corrections && result.medgemma_corrections.length > 0 && (
+                    <p className="text-[11px] text-violet-700 bg-violet-50 border border-violet-200 rounded-full inline-flex px-3 py-1 mb-2 font-medium">
+                      MedGemma corrected {result.medgemma_corrections.length} medical word{result.medgemma_corrections.length === 1 ? "" : "s"} (marked with *): {result.medgemma_corrections.map((a) => `${a.from} → ${a.to}`).join(", ")}
+                    </p>
+                  )}
+                  {save.msg && (
+                    <p className={"text-xs font-medium mb-2 " + (save.status === "error" ? "text-red-600" : "text-emerald-600")}>
+                      {save.msg}
+                    </p>
+                  )}
                   {pages.length > 1 && (
                     <div className="flex flex-wrap gap-1.5 mb-3">
                       {pages.map((p, i) => (
                         <button
                           key={p.page}
+                          disabled={editing}
                           onClick={() => setPageIdx(i)}
+                          title={editing ? "Finish editing this page first" : undefined}
                           className={
                             "rounded-full border px-3 py-1 text-xs font-medium transition " +
-                            (i === pageIdx ? "bg-primary text-white border-primary" : "border-line text-primary hover:bg-mint-2")
+                            (i === curIdx ? "bg-primary text-white border-primary" : "border-line text-primary hover:bg-mint-2") +
+                            (editing ? " opacity-40 cursor-not-allowed" : "")
                           }
                         >
                           Page {p.page}
@@ -844,7 +973,32 @@
                     </div>
                   )}
                   {page && page.layout_html ? (
-                    <LayoutFrame html={page.layout_html} />
+                    <React.Fragment>
+                      <div className="mb-2">
+                        {editing ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-3 py-1">
+                            <span className="material-symbols-outlined text-sm">edit</span>
+                            Editing — click into the text to correct it, then Save (Ctrl+Enter). Esc cancels.
+                          </span>
+                        ) : uncCount > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-3 py-1">
+                            <span className="material-symbols-outlined text-sm">warning</span>
+                            {uncCount} uncertain word{uncCount === 1 ? "" : "s"} highlighted in yellow — please verify {uncCount === 1 ? "it" : "these"}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
+                            <span className="material-symbols-outlined text-sm">check_circle</span>
+                            No uncertain words on this page
+                          </span>
+                        )}
+                      </div>
+                      <LayoutFrame
+                        html={page.layout_html}
+                        editable={editing}
+                        frameRef={frameRef}
+                        keyActionsRef={keyActionsRef}
+                      />
+                    </React.Fragment>
                   ) : (
                     <p className="text-ink-soft text-sm italic p-2">
                       {(page && page.layout_error) || "No layout reconstruction available for this page."}
@@ -992,7 +1146,7 @@
 
             <div className="px-6 py-4 border-t border-line/60 flex items-center justify-between">
               <p className="text-xs text-ink-soft italic">
-                Values are verbatim from the document; to correct mistakes, edit the Raw Text on the Review page.
+                Values are verbatim from the document; to correct mistakes, click Edit on the Review page and fix the layout.
               </p>
               <button
                 disabled={!done}
@@ -1031,7 +1185,9 @@
       const [step, setStep] = useState(1);
       const [docs, setDocs] = useState([]); // [{ id, file, status, result, error }]
 
-      const onRawTextSaved = (docId, newText, pairs) =>
+      // edited = {pageIdx, html, text}: the page the user corrected directly
+      // in the layout — their exact HTML wins over regex patching there.
+      const onRawTextSaved = (docId, newText, pairs, edited) =>
         setDocs((ds) => ds.map((d) => {
           if (d.id !== docId) return d;
           let pages = (d.result && d.result.pages) || [];
@@ -1084,14 +1240,31 @@
               return { ...p, _orig_layout: p._orig_layout || p.layout_html, layout_html: html };
             });
           }
-          return { ...d, result: { ...d.result, pages, raw_text: newText, raw_text_corrected: true } };
+          if (edited && pages[edited.pageIdx]) {
+            pages = pages.map((p, i) => i !== edited.pageIdx ? p : {
+              ...p,
+              _orig_layout: p._orig_layout || p.layout_html,
+              _orig_text: p._orig_text || p.text,
+              layout_html: edited.html,
+              text: edited.text,
+            });
+          }
+          const wasCorrected = !!(d.result && d.result.raw_text_corrected);
+          const textChanged = newText !== ((d.result && d.result.raw_text) || "");
+          return { ...d, result: { ...d.result, pages, raw_text: newText, raw_text_corrected: textChanged || wasCorrected } };
         }));
 
       const onRawTextReverted = (docId, originalText) =>
         setDocs((ds) => ds.map((d) => {
           if (d.id !== docId) return d;
           const pages = ((d.result && d.result.pages) || []).map((p) =>
-            p._orig_layout ? { ...p, layout_html: p._orig_layout, _orig_layout: undefined } : p
+            (p._orig_layout || p._orig_text) ? {
+              ...p,
+              layout_html: p._orig_layout || p.layout_html,
+              text: p._orig_text || p.text,
+              _orig_layout: undefined,
+              _orig_text: undefined,
+            } : p
           );
           return { ...d, result: { ...d.result, pages, raw_text: originalText, raw_text_corrected: false } };
         }));

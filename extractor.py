@@ -31,8 +31,8 @@ from PIL import Image
 
 import feedback_store
 
-_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
+_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").strip().rstrip("/")
+_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b").strip()
 _TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))
 _NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
@@ -245,12 +245,17 @@ Preserve all identifiers exactly.
 Never merge digits or remove slashes.
 
 --------------------------------------
-STAMPS / SIGNATURES / DIAGRAMS
+STAMPS / SIGNATURES / DIAGRAMS / IMAGES
 --------------------------------------
 
-  Stamps:    [STAMP: text]
-  Signatures:[SIGNATURE: text]
-  Diagrams:  [DIAGRAM: description and markings]
+  Stamps:       [STAMP: text]
+  Signatures:   [SIGNATURE: text]
+  Diagrams:     [DIAGRAM: description and markings]
+  Photos/Logos: [IMAGE: short description]
+
+Every picture printed or pasted on the page (photograph, hospital logo,
+graphic seal, barcode/QR code, scanned image) must be recorded with an
+[IMAGE: ...] marker at its position in the reading order.
 """
 
 _READ_USER = (
@@ -304,9 +309,10 @@ OUTPUT RULES
 AVAILABLE CLASSES
 
   hw     Handwritten content.
-  stamp  Stamps, seals, logos, and signatures.
+  stamp  Text-only stamps, seals, and signatures.
   unc    Uncertain text.
-  cut    Diagrams, drawings, sketches and figures.
+  cut    ANY pictorial region: photos, logos, printed diagrams,
+         hand-drawn sketches, graphic seals, barcodes, QR codes.
 
 Examples:
   <span class="hw">Left breast lump x 6 months</span>
@@ -354,6 +360,11 @@ Wrap handwritten content in:
 
 Do not convert handwriting into printed text.
 
+UNCERTAIN WORDS: every word that carries the (?) marker in the raw
+text MUST be wrapped in its own <span class="unc">word(?)</span> in
+the HTML — wrap ONLY the uncertain word(s), never the whole line,
+and keep the (?) inside the span.
+
 ------------------------------------
 CHECKLISTS
 ------------------------------------
@@ -376,7 +387,18 @@ SPECIAL CONTENT
 
   Stamps:     <span class="stamp">[STAMP: text]</span>
   Signatures: <span class="stamp">[SIGNATURE: name]</span>
-  Diagrams:   <img class="cut" ...>
+  Pictures:   <img class="cut" data-bbox="X,Y,W,H" alt="[IMAGE: description]">
+
+EVERY picture on the page (photo, logo, printed diagram, hand-drawn
+sketch, graphic seal, barcode, QR code) MUST be output as exactly ONE
+img.cut tag, placed at its position in the reading order.
+- data-bbox is REQUIRED. X,Y = top-left corner, W,H = width,height —
+  all four are PERCENTAGES (0-100) of the full page.
+  Example: a hospital logo in the top-left tenth of the page
+  -> data-bbox="2,1,12,8".
+- Never redraw a picture as text or ASCII art. Never omit data-bbox.
+- Text-only rubber stamps stay <span class="stamp">; use img.cut when
+  the stamp/seal is a graphic image.
 
 ------------------------------------
 ACCURACY RULES
@@ -404,11 +426,14 @@ _LAYOUT_USER = (
     "Available classes:\n"
     "- class=\"hw\" for handwritten text.\n"
     "- class=\"stamp\" for stamps, seals, logos, and signatures.\n"
-    "- class=\"unc\" for uncertain text containing '(?)'.\n"
-    "- class=\"cut\" only for actual diagrams, sketches, charts, or figures.\n\n"
-    "For diagrams only:\n"
-    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[DIAGRAM: description]\">\n"
-    "Use percentage coordinates relative to the page.\n\n"
+    "- class=\"unc\" for uncertain text containing '(?)' — wrap each "
+    "uncertain word in its own <span class=\"unc\">.\n"
+    "- class=\"cut\" for every pictorial region: photos, logos, diagrams, "
+    "sketches, charts, figures, graphic seals, barcodes, QR codes.\n\n"
+    "For every picture (photo, logo, diagram, seal, barcode):\n"
+    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[IMAGE: description]\">\n"
+    "data-bbox is REQUIRED — X,Y,W,H are percentage coordinates (0-100) "
+    "relative to the page, placed where the picture sits in reading order.\n\n"
     "Checklist sections:\n"
     "- Preserve all checklist items present in the extracted content.\n"
     "- Append '(Circled)' to selected items.\n"
@@ -661,6 +686,10 @@ def _parse_json_loose(text: str) -> dict:
 def _sanitize_html(fragment: str) -> str:
     """Defense-in-depth scrub; the sandboxed iframe is the real boundary."""
     fragment = _strip_fences(fragment)
+    # Models sometimes wrap the fragment in <html>/<head>/<body> despite the
+    # prompt — drop the wrappers, keep the content.
+    fragment = re.sub(r"</?(?:html|head|body)\b[^>]*>", "", fragment,
+                      flags=re.IGNORECASE)
     fragment = re.sub(r"<script\b.*?</script\s*>", "", fragment,
                       flags=re.IGNORECASE | re.DOTALL)
     fragment = re.sub(r"<script\b[^>]*>", "", fragment, flags=re.IGNORECASE)
@@ -703,6 +732,39 @@ def _sanitize_html(fragment: str) -> str:
     fragment = re.sub(r"style\s*=\s*([\"'])(.*?)\1", _defuse_style,
                       fragment, flags=re.IGNORECASE | re.DOTALL)
     return fragment.strip()
+
+
+def _wrap_uncertain(html: str) -> str:
+    """
+    Guarantee that every (?)-marked word in the layout HTML is wrapped in
+    <span class="unc"> so the UI can highlight it — even when the model
+    forgot the class. Walks tag/text pieces, skips text already inside an
+    unc span, and never touches tag attributes. Never raises.
+    """
+    if not html or "(?)" not in html:
+        return html
+    try:
+        parts = re.split(r"(<[^>]*>)", html)
+        depth = 0  # <span> nesting depth while inside an unc span
+        out = []
+        for part in parts:
+            if part.startswith("<"):
+                low = part.lower()
+                if low.startswith("<span"):
+                    if depth:
+                        depth += 1
+                    elif re.search(r'class\s*=\s*["\'][^"\']*\bunc\b', low):
+                        depth = 1
+                elif low.startswith("</span") and depth:
+                    depth -= 1
+            elif depth == 0 and "(?)" in part:
+                part = re.sub(r"(\S+\(\?\))",
+                              r'<span class="unc">\1</span>', part)
+            out.append(part)
+        return "".join(out)
+    except Exception as e:
+        print(f"[WARNING] uncertain-word wrapping failed: {e}")
+        return html
 
 
 # Values that exist ONLY as format examples inside the prompts above.
@@ -757,8 +819,36 @@ def _clean_checklist_html(html: str) -> str:
 
 
 # Crops embedded into the layout are capped to this long-edge size.
-_CROP_MAX_EDGE = 500
+_CROP_MAX_EDGE = int(os.getenv("CROP_MAX_EDGE", "500"))
 _CROP_PAD_PCT = 2.0
+
+
+def _normalize_bbox(x, y, w, h, pw, ph):
+    """
+    Normalize a model-emitted bbox to clamped page percentages.
+    Qwen's grounding training sometimes emits absolute pixel coordinates
+    despite the prompt asking for percentages — detect (any value > 100)
+    and convert using the real page size. Returns (x, y, w, h) in percent
+    or None when the box is degenerate or covers ~the whole page.
+    """
+    if max(x, y, w, h) > 100:
+        x, y, w, h = x / pw * 100, y / ph * 100, w / pw * 100, h / ph * 100
+    x = min(max(x, 0.0), 100.0)
+    y = min(max(y, 0.0), 100.0)
+    w = min(max(w, 0.0), 100.0 - x)
+    h = min(max(h, 0.0), 100.0 - y)
+    if w < 0.5 or h < 0.5 or w * h > 95 * 95:
+        return None
+    return x, y, w, h
+
+
+def _bbox_iou(a, b):
+    """Intersection-over-union of two (x, y, w, h) percent boxes."""
+    ix = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
 
 
 def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
@@ -779,16 +869,26 @@ def _embed_region_crops(fragment: str, page_image_bytes: bytes) -> str:
         print(f"[WARNING] could not open page image for crops: {e}")
         return fragment
 
+    injected = []  # percent boxes already embedded on this page
+
     def _crop_tag(match):
         tag = match.group(0)
         try:
             x, y, w, h = [float(v) for v in match.group(1).split(",")]
+            box = _normalize_bbox(x, y, w, h, pw, ph)
+            if box is None:
+                return tag
+            x, y, w, h = box
+            # Duplicate tag for the same region (model repeats a logo).
+            if any(_bbox_iou(box, prev) > 0.8 for prev in injected):
+                return tag
             left = max(0, int((x - _CROP_PAD_PCT) / 100 * pw))
             top = max(0, int((y - _CROP_PAD_PCT) / 100 * ph))
             right = min(pw, int((x + w + _CROP_PAD_PCT) / 100 * pw))
             bottom = min(ph, int((y + h + _CROP_PAD_PCT) / 100 * ph))
             if right - left < 4 or bottom - top < 4:
                 return tag
+            injected.append(box)
             crop = img.crop((left, top, right, bottom))
             scale = _CROP_MAX_EDGE / max(crop.size)
             if scale < 1:
@@ -824,7 +924,10 @@ _LOCAL_RULES = (
     "Read the entire page from top to bottom and left to right.\n"
     "Extract every visible text element, handwritten note, printed text, number, symbol, "
     "label, heading, stamp, and annotation.\n"
-    "Do not omit any visible content.\n\n"
+    "Do not omit any visible content.\n"
+    "A large vertical gap between handwritten lines NEVER means the page is "
+    "finished — scan all the way to the bottom edge; lines separated by wide "
+    "blank space are still part of the page and must be transcribed.\n\n"
 
     "3. \"CIRCLE IF POSITIVE\" CHECKLISTS\n"
     "When a section is labeled \"(Circle If Positive)\" and contains printed symptom or "
@@ -860,7 +963,10 @@ _LOCAL_RULES = (
     "Do not use [illegible], [unreadable], or blanks.\n"
     "If a word is difficult to read, provide your best interpretation and append (?) "
     "to the uncertain word or phrase.\n"
-    "Example: lymphadenopathy(?)\n\n"
+    "Example: lymphadenopathy(?)\n"
+    "In the HTML section, wrap every (?) word in its own "
+    "<span class=\"unc\">word(?)</span> — only the uncertain word, "
+    "never the whole line.\n\n"
 
     "7. NO HALLUCINATION\n"
     "Output only information that is physically visible on the page.\n"
@@ -902,7 +1008,12 @@ _LOCAL_USER_RULES = (
     "- Every row scanned across its FULL width — no group on the middle or "
     "right side of a row is missed.\n"
     "- Consecutive handwritten lines under a heading: ALL transcribed — "
-    "count the lines on the page and match that count in your output.\n"
+    "count the lines on the page and match that count in your output, even "
+    "when wide blank space separates them.\n"
+    "- Every picture (photo, logo, diagram, seal, barcode) has one "
+    "<img class=\"cut\" data-bbox=\"X,Y,W,H\"> tag in the HTML section, at "
+    "its reading-order position, with percentage coordinates.\n"
+    "- Every (?) word is wrapped in <span class=\"unc\"> in the HTML section.\n"
     "- (Circled) used ONLY with clear visual evidence; when unsure, leave "
     "the item unmarked.\n"
     "- Tabular reports formatted as tables; prescriptions line-by-line, "
@@ -1219,8 +1330,11 @@ _LAYOUT_SLIM_SYSTEM = (
     "Printed form text (headings, labels, symptom lists, footers) is NEVER hw — plain text only.\n"
     "- class=\"unc\" = uncertain words with (?) suffix.\n"
     "- class=\"stamp\" = stamps, seals, signatures: '[STAMP: text]'.\n"
-    "- class=\"cut\" = ONLY real drawn diagrams: "
-    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[DIAGRAM: description]\">\n"
+    "- class=\"cut\" = every pictorial region (photo, logo, diagram, sketch, "
+    "graphic seal, barcode, QR code): "
+    "<img class=\"cut\" data-bbox=\"X,Y,W,H\" alt=\"[IMAGE: description]\"> — "
+    "data-bbox REQUIRED, X,Y,W,H as percentages (0-100) of the page, tag "
+    "placed at the picture's reading-order position.\n"
     "- NO position:absolute, NO negative margins.\n"
     "- Mirror the image structure: single-column page → single column HTML. "
     "Two-column page → flex row. Printed symptom list → <p> not <table>. "
@@ -1526,6 +1640,147 @@ def _render_pdf_pages(data: bytes) -> list:
         doc.close()
 
 
+# ── Missed-line verification pass ────────────────────────────────────
+# Second look at pages that contain handwriting: the model receives the
+# page image plus the numbered transcription and reports lines that are
+# completely missing, which are merged back into text and layout.
+_VERIFY = os.getenv("VERIFY_MISSED_LINES", "1").strip().lower() in (
+    "1", "true", "yes", "on")
+
+# Gap between anchor words in layout HTML: tags, punctuation, whitespace.
+# (Same pattern as backend._ANCHOR_GAP.)
+_ANCHOR_GAP = r"(?:<[^>]*>|[^A-Za-z0-9<])*"
+
+_VERIFY_SYSTEM = (
+    "You are a transcription completeness checker for medical documents. "
+    "You receive ONE page image and a NUMBERED transcription of that page. "
+    "Compare them and report ONLY lines of visible text (printed or "
+    "handwritten) that are COMPLETELY MISSING from the transcription. "
+    "Do NOT report spelling differences, re-wordings, formatting changes, "
+    "or lines that are already present. "
+    "Pay special attention to: handwritten lines separated by large "
+    "vertical gaps, the right half of every row, margins and corners, and "
+    "content below the last printed section. "
+    "Transcribe each missing line exactly as written, appending (?) to any "
+    "uncertain word. "
+    'Output ONLY JSON: {"missing": [{"after_line": <int>, "text": "<line>"}]} '
+    "where after_line is the transcription line number that the missing "
+    "line appears BELOW on the page (0 = above the first line). "
+    'If nothing is missing output {"missing": []}.'
+)
+
+_VERIFY_USER = (
+    "Transcription of page {page} (numbered):\n\n{numbered}\n\n"
+    "Compare against the page image and return the JSON now."
+)
+
+
+def _page_has_handwriting(text: str, layout_html: str) -> bool:
+    """Heuristic: the page contains handwriting or uncertain words."""
+    if layout_html and re.search(r'class\s*=\s*["\'][^"\']*\bhw\b',
+                                 layout_html):
+        return True
+    return "(?)" in (text or "")
+
+
+def _insert_line_into_layout(layout_html: str, anchor_line: str,
+                             cand: str) -> str:
+    """
+    Insert a recovered line into the layout HTML right after the block
+    containing the anchor line (the transcript line directly above it on
+    the page). Falls back to appending at the end of the fragment.
+    """
+    escaped = (cand.replace("&", "&amp;")
+                   .replace("<", "&lt;").replace(">", "&gt;"))
+    new_block = f'<div><span class="hw">{escaped}</span></div>'
+    tokens = re.findall(r"[A-Za-z0-9]+", anchor_line or "")[-6:]
+    block_close = re.compile(
+        r"</div\s*>|</p\s*>|</li\s*>|</tr\s*>|</h[1-6]\s*>|<br\s*/?>",
+        re.IGNORECASE)
+    for k in range(len(tokens)):
+        anchor_rx = re.compile(
+            _ANCHOR_GAP.join(re.escape(w) for w in tokens[k:]),
+            re.IGNORECASE)
+        m = anchor_rx.search(layout_html)
+        if not m:
+            continue
+        bm = block_close.search(layout_html, m.end())
+        pos = bm.end() if bm else m.end()
+        return layout_html[:pos] + new_block + layout_html[pos:]
+    return layout_html + new_block
+
+
+def _verify_completeness(b64_image: str, page_num: int, text: str,
+                         layout_html: str) -> tuple:
+    """
+    One extra vision call that recovers lines the first read skipped.
+    Returns (text, layout_html) — unchanged on any failure; never raises.
+    """
+    try:
+        lines = text.splitlines()
+        numbered = "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(lines))
+        raw, _ = _ollama_chat(
+            _VERIFY_SYSTEM,
+            _VERIFY_USER.format(page=page_num, numbered=numbered),
+            [b64_image],
+            3000,
+            json_mode=True,
+        )
+        missing = (_parse_json_loose(raw) if raw else {}).get("missing") or []
+        if not isinstance(missing, list):
+            return text, layout_html
+
+        line_token_sets = [
+            set(re.findall(r"[a-z0-9]+", ln.lower())) for ln in lines]
+        accepted = []
+        for item in missing[:20]:
+            if not isinstance(item, dict):
+                continue
+            cand = str(item.get("text") or "").strip()
+            if len(cand) < 2:
+                continue
+            cand_toks = set(re.findall(r"[a-z0-9]+", cand.lower()))
+            if not cand_toks:
+                continue
+            # Fuzzy duplicate: most of the candidate already sits in one
+            # existing line — the model re-reported, not recovered.
+            if any(toks and len(cand_toks & toks) >= 0.7 * len(cand_toks)
+                   for toks in line_token_sets):
+                continue
+            try:
+                after = int(item.get("after_line", len(lines)))
+            except (TypeError, ValueError):
+                after = len(lines)
+            accepted.append((min(max(after, 0), len(lines)), cand))
+
+        # Insert bottom-up so earlier indices stay valid.
+        for after, cand in sorted(accepted, key=lambda t: t[0], reverse=True):
+            anchor_line = lines[after - 1] if after >= 1 else ""
+            if layout_html:
+                layout_html = _insert_line_into_layout(
+                    layout_html, anchor_line, cand)
+            lines.insert(after, cand)
+        if accepted:
+            text = "\n".join(lines)
+        print(f"[INFO] Page {page_num}: verify pass recovered "
+              f"{len(accepted)} line(s)")
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: verify pass skipped ({e})")
+        return text, layout_html
+
+
+def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
+    """read_page + optional missed-line verification + unc wrapping."""
+    text, layout_html, layout_error = read_page(b64_image, page_num, mime)
+    if _VERIFY and text and _page_has_handwriting(text, layout_html):
+        text, layout_html = _verify_completeness(
+            b64_image, page_num, text, layout_html)
+    if layout_html:
+        layout_html = _wrap_uncertain(layout_html)
+    return text, layout_html, layout_error
+
+
 def extract(data: bytes, ext: str) -> tuple:
     """
     Extract from an uploaded prescription. Returns (pages, extras, meta):
@@ -1558,7 +1813,7 @@ def extract(data: bytes, ext: str) -> tuple:
     # document, all concurrent.
     with ThreadPoolExecutor(max_workers=min(8, len(rendered) + 1)) as pool:
         page_futs = {
-            n: pool.submit(read_page, b64, n, mime)
+            n: pool.submit(_read_page_full, b64, n, mime)
             for n, b64, mime in rendered
         }
         fields_fut = pool.submit(read_structured_fields, rendered)
