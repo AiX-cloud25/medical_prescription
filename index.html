@@ -666,6 +666,12 @@
             return 'src="http://localhost/' + name + '"';
           }
         );
+        // Word shrinks images that carry the screen layout's float /
+        // max-width styles — drop them and give crops an explicit
+        // readable width instead (460px ≈ 4.8in on an A4 page).
+        html = html
+          .replace(/(<img\b[^>]*?)\s+style\s*=\s*"[^"]*"/gi, "$1")
+          .replace(/<img\b(?![^>]*\bwidth=)/gi, '<img width="460"');
         const header = pages.length > 1 ? '<h3 class="pg">Page ' + p.page + "</h3>" : "";
         const brk = i < pages.length - 1 ? '<br clear="all" style="page-break-before:always">' : "";
         return "<div>" + header + html + "</div>" + brk;

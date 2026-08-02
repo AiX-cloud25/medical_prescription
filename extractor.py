@@ -40,7 +40,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-02-r3"
+EXTRACTOR_BUILD = "2026-08-02-r4"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -2009,6 +2009,73 @@ def _header_suspect(text: str) -> bool:
     return any(ln.count("|") >= 2 for ln in lines[:3])
 
 
+# ── Targeted header recovery ─────────────────────────────────────────
+# When a page still looks header-less after the verify pass, read JUST
+# the top strip of the page image and prepend whatever lines are
+# missing. Focused single-region transcription is far more reliable
+# than asking the model to notice the omission on a full page.
+_HEADER_CROP_FRAC = 0.28
+_HEADER_SYSTEM = (
+    "You transcribe the TOP region of a medical document page. It "
+    "typically contains the letterhead / facility name, a report title, "
+    "and a printed patient-details box. Output EVERY visible text line, "
+    "top to bottom — facility lines as written, patient details as "
+    "Label : Value lines. Plain text only, no markdown, no commentary. "
+    "English/Roman characters only (translate or transliterate any "
+    "regional-script text)."
+)
+
+
+def _recover_header(b64_image: str, page_num: int, text: str,
+                    layout_html: str) -> tuple:
+    """
+    Transcribe the top strip of the page and prepend any lines missing
+    from the transcript (and layout). Never raises.
+    """
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(b64_image)))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        pw, ph = img.size
+        crop = img.crop((0, 0, pw, max(60, int(ph * _HEADER_CROP_FRAC))))
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=85)
+        hb64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        raw, _ = _ollama_chat(
+            _HEADER_SYSTEM, "Transcribe this header region now.",
+            [hb64], 1200)
+        if not raw or _cjk_garbage(raw):
+            return text, layout_html
+        existing = [set(re.findall(r"[a-z0-9]+", ln.lower()))
+                    for ln in (text or "").splitlines()[:20]]
+        add = []
+        for ln in raw.splitlines():
+            ln = ln.strip()
+            toks = set(re.findall(r"[a-z0-9]+", ln.lower()))
+            if len(ln) < 3 or not toks:
+                continue
+            if any(t and len(toks & t) >= 0.6 * len(toks)
+                   for t in existing):
+                continue
+            add.append(ln)
+            if len(add) >= 12:
+                break
+        if not add:
+            print(f"[INFO] Page {page_num}: header check — nothing missing")
+            return text, layout_html
+        text = "\n".join(add) + "\n" + (text or "")
+        esc = (lambda s: s.replace("&", "&amp;")
+               .replace("<", "&lt;").replace(">", "&gt;"))
+        block = "<div>" + "<br>".join(esc(l) for l in add) + "</div>"
+        layout_html = block + (layout_html or "")
+        print(f"[INFO] Page {page_num}: recovered {len(add)} header "
+              f"line(s) from top-strip read")
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: header recovery skipped ({e})")
+        return text, layout_html
+
+
 def _insert_html_after_anchor(layout_html: str, anchor_line: str,
                               new_block: str) -> str:
     """
@@ -2118,9 +2185,11 @@ _DIAGRAM_SYSTEM = (
     "A drawing is a pen-drawn FIGURE built from NON-LETTER SHAPES: an "
     "anatomy outline (breast, chest, abdomen, limb, organ), a "
     "lesion/tumour map, circles or ovals drawn to represent organs or "
-    "masses, a marked-up body outline, a freehand clinical illustration — "
-    "including small or faint ones. Handwritten labels inside or beside "
-    "such a figure are part of it.\n"
+    "masses (e.g. a pair of breast circles with dots, hatching or "
+    "arrows), a marked-up body outline, a freehand clinical "
+    "illustration — including small or faint ones. Handwritten labels "
+    "inside or beside such a figure are part of it. A circle drawn "
+    "AROUND an existing word or number is NOT a drawing.\n"
     "NEVER report:\n"
     "- handwritten words, sentences, numbers or lab values — even messy, "
     "slanted, crossed-out or hard-to-read handwriting is TEXT, not a "
@@ -2162,8 +2231,13 @@ _DIAGRAM_VERIFY_SYSTEM = (
     "symbol — the crop contains only a small shorthand mark: a "
     "triangle/delta, arrow, tick, circled word or number, bracket, "
     "underline, or plus/minus sign.\n"
-    "Rough circles, loops or flourishes drawn AROUND words or numbers "
-    "are text, not drawings. If you are not sure, answer text.\n"
+    "Distinguish carefully: a circle or loop drawn AROUND an existing "
+    "word or number (to select or highlight it) is text/symbol — but "
+    "circles or ovals drawn as SHAPES representing anatomy (e.g. one or "
+    "two breast circles with dots, hatching, arrows or labels pointing "
+    "at them) are a drawing. If the circle would be meaningless without "
+    "the word inside it, it is text; if it depicts a body part or "
+    "lesion, it is a drawing. If you are still not sure, answer text.\n"
     'Output ONLY JSON: {"verdict": "drawing" | "text" | "symbol"}.'
 )
 _DIAGRAM_VERIFY_USER = "Classify this cropped region and return the JSON now."
@@ -2474,6 +2548,88 @@ def _rescue_sparse_page(b64_image: str, page_num: int):
     return None
 
 
+# ── Deterministic checklist container ────────────────────────────────
+# The bordered box around the "(Circle If Positive)" checklist must not
+# depend on the model remembering the class on every run — when the
+# marker is present in the text but the layout has no checklist div,
+# wrap the checklist's top-level blocks in one programmatically.
+_CHECKLIST_END_ANCHORS = (
+    "complaints and duration", "history of present illness",
+    "general examination", "clinical impression", "diagnosis",
+    "investigation", "proposed")
+
+
+def _split_top_level(fragment: str) -> list:
+    """
+    Split an HTML fragment into tag-balanced top-level chunks so ranges
+    of chunks can be wrapped without breaking element nesting.
+    """
+    chunks = []
+    depth = 0
+    start = 0
+    void_rx = re.compile(r"<(?:br|img|hr|input|meta|link)\b", re.IGNORECASE)
+    for m in re.finditer(r"<[^>]*>", fragment):
+        tag = m.group(0)
+        if tag.startswith("</"):
+            if depth > 0:
+                depth -= 1
+                if depth == 0:
+                    chunks.append(fragment[start:m.end()])
+                    start = m.end()
+        elif tag.endswith("/>") or void_rx.match(tag) or tag.startswith("<!"):
+            if depth == 0:
+                chunks.append(fragment[start:m.end()])
+                start = m.end()
+        else:
+            if depth == 0 and m.start() > start:
+                chunks.append(fragment[start:m.start()])
+                start = m.start()
+            depth += 1
+    if start < len(fragment):
+        chunks.append(fragment[start:])
+    return chunks
+
+
+def _ensure_checklist_container(text: str, layout_html: str) -> str:
+    """
+    Guarantee the printed checklist is wrapped in <div class="checklist">
+    whenever the page has a "(Circle If Positive)" section. No-op when
+    the model already emitted the container. Never raises.
+    """
+    if not layout_html or not text:
+        return layout_html
+    if "circle if positive" not in text.lower():
+        return layout_html
+    if re.search(r'class\s*=\s*["\'][^"\']*\bchecklist\b', layout_html):
+        return layout_html
+    try:
+        chunks = _split_top_level(layout_html)
+
+        def chunk_text(c):
+            return re.sub(r"<[^>]*>", " ", c).lower()
+
+        start_i = next((i for i, c in enumerate(chunks)
+                        if "circle if positive" in chunk_text(c)), None)
+        if start_i is None:
+            return layout_html
+        # Both columns inside one big chunk → the model already built its
+        # own structure; wrapping would swallow the handwritten column.
+        if any(a in chunk_text(chunks[start_i])
+               for a in _CHECKLIST_END_ANCHORS):
+            return layout_html
+        end_i = next((i for i in range(start_i + 1, len(chunks))
+                      if any(a in chunk_text(chunks[i])
+                             for a in _CHECKLIST_END_ANCHORS)),
+                     len(chunks))
+        wrapped = ('<div class="checklist">'
+                   + "".join(chunks[start_i:end_i]) + "</div>")
+        print("[INFO] checklist container added programmatically")
+        return "".join(chunks[:start_i]) + wrapped + "".join(chunks[end_i:])
+    except Exception as e:
+        print(f"[WARNING] checklist wrap skipped ({e})")
+        return layout_html
+
+
 # ── Deterministic shorthand repair ───────────────────────────────────
 # The model keeps misreading handwritten "C/o" (Complains of) at the
 # start of complaint lines as "yo"/"y/o"/"4o" despite prompt guidance.
@@ -2537,12 +2693,18 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
                              or _page_has_handwriting(text, layout_html)):
         text, layout_html = _verify_completeness(
             b64_image, page_num, text, layout_html)
+    # Still header-less after the verify pass → read the top strip
+    # directly and prepend what's missing.
+    if text and _header_suspect(text):
+        text, layout_html = _recover_header(
+            b64_image, page_num, text, layout_html)
     if _DETECT_DIAGRAMS and text and _should_detect(text, layout_html):
         dets, page_size = _detect_diagrams(b64_image, page_num)
         text, layout_html = _merge_diagram_boxes(
             text, layout_html, dets, page_size)
     text = _fix_shorthand(text)
     layout_html = _fix_shorthand_html(layout_html)
+    layout_html = _ensure_checklist_container(text, layout_html)
     text, layout_html = _translate_residual_scripts(
         page_num, text, layout_html)
     if layout_html:
