@@ -37,6 +37,13 @@ _TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))
 _NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "32768"))
 ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 
+# Bumped on every behavioral change; printed at import so the server log
+# proves which build is actually running (deployments happen by git pull
+# on a remote box — a stale checkout is otherwise invisible).
+EXTRACTOR_BUILD = "2026-08-02-r3"
+print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
+      f"host={_HOST}")
+
 # Render resolution for PDF pages sent to the vision model.
 # 300 DPI gives much better quality for handwritten medical documents.
 _RENDER_DPI = 300
@@ -105,7 +112,10 @@ A. TABULAR REPORT PAGE
    (lab / haematology / biochemistry / investigation results printed
    as a grid of rows and columns)
    - Output the report header (facility, patient details, dates)
-     first as Label : Value lines.
+     first as Label : Value lines. The letterhead, report title, and
+     the printed patient-details box at the TOP of the page are part
+     of the page — NEVER skip them; transcribe them before the
+     results table.
    - Output the results as a pipe-separated table (rule 6): ONE row per
      test with its Result and Reference Range in separate columns.
    - NEVER output lab results as one line per value, as Label : Value
@@ -1870,9 +1880,10 @@ _VERIFY_SYSTEM = (
     "handwritten) that are COMPLETELY MISSING from the transcription. "
     "Do NOT report spelling differences, re-wordings, formatting changes, "
     "or lines that are already present. "
-    "Pay special attention to: handwritten lines separated by large "
-    "vertical gaps, the right half of every row, margins and corners, and "
-    "content below the last printed section. "
+    "Pay special attention to: the printed letterhead, report title and "
+    "patient-details box at the VERY TOP of the page, handwritten lines "
+    "separated by large vertical gaps, the right half of every row, "
+    "margins and corners, and content below the last printed section. "
     "Transcribe each missing line exactly as written, appending (?) to any "
     "uncertain word. Any recovered line written in a regional script "
     "(Kannada, Hindi, Tamil, etc.) must be translated into English (names "
@@ -1986,6 +1997,16 @@ def _page_has_handwriting(text: str, layout_html: str) -> bool:
                                  layout_html):
         return True
     return "(?)" in (text or "")
+
+
+def _header_suspect(text: str) -> bool:
+    """
+    A printed report whose results table starts almost immediately —
+    the letterhead / report title / patient-details box at the top was
+    probably skipped. Used to force the verify pass on such pages.
+    """
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    return any(ln.count("|") >= 2 for ln in lines[:3])
 
 
 def _insert_html_after_anchor(layout_html: str, anchor_line: str,
@@ -2141,6 +2162,8 @@ _DIAGRAM_VERIFY_SYSTEM = (
     "symbol — the crop contains only a small shorthand mark: a "
     "triangle/delta, arrow, tick, circled word or number, bracket, "
     "underline, or plus/minus sign.\n"
+    "Rough circles, loops or flourishes drawn AROUND words or numbers "
+    "are text, not drawings. If you are not sure, answer text.\n"
     'Output ONLY JSON: {"verdict": "drawing" | "text" | "symbol"}.'
 )
 _DIAGRAM_VERIFY_USER = "Classify this cropped region and return the JSON now."
@@ -2244,20 +2267,19 @@ def _detect_diagrams(b64_image: str, page_num: int) -> tuple:
                     break
             # Second opinion: crop each candidate and ask what it is —
             # rejects handwriting/symbol regions the grounding call
-            # mistook for drawings. Fails open on verification errors.
+            # mistook for drawings. Fails CLOSED: only an explicit
+            # "drawing" verdict keeps a candidate (a wrong text-crop is
+            # worse for the reviewer than a missed drawing).
             if img is not None and dets:
                 kept = []
                 for d in dets:
                     verdict = _verify_diagram_crop(img, d["box"], page_num)
-                    if verdict in ("text", "symbol"):
+                    if verdict == "drawing":
+                        kept.append(d)
+                    else:
                         print(f"[INFO] Page {page_num}: diagram candidate "
                               f"rejected by crop check (verdict={verdict}, "
                               f"box={d['box']})")
-                        continue
-                    if verdict is None:
-                        print(f"[WARNING] Page {page_num}: crop check "
-                              f"inconclusive — keeping candidate")
-                    kept.append(d)
                 dets = kept
             print(f"[INFO] Page {page_num}: diagram detector found "
                   f"{len(dets)} drawing(s)")
@@ -2455,20 +2477,34 @@ def _rescue_sparse_page(b64_image: str, page_num: int):
 # ── Deterministic shorthand repair ───────────────────────────────────
 # The model keeps misreading handwritten "C/o" (Complains of) at the
 # start of complaint lines as "yo"/"y/o"/"4o" despite prompt guidance.
-# Line-start anchoring keeps "45 y/o female" (age) safe, and plain "40"
-# is deliberately excluded so dosages are never touched.
-_SHORTHAND_LINE_RX = re.compile(r"(?im)^(?:y/o|yo|4o)\b(?=[ \t]+\S)")
+# Line-start anchoring (with optional indentation/bullet) keeps
+# "45 y/o female" (age) safe, and plain "40" is deliberately excluded
+# so dosages are never touched.
+_SHORTHAND_LINE_RX = re.compile(
+    r"(?im)^([ \t]*(?:[-–•*]\s*)?)(?:y/o|yo|4o)\b(?=[ \t]+\S)")
+# HTML variant 1: right after an hw-span opens.
 _SHORTHAND_HTML_RX = re.compile(
-    r'(?is)(<span[^>]*\bclass\s*=\s*"[^"]*\bhw\b[^"]*"[^>]*>\s*)'
+    r'(?is)(<span[^>]*\bclass\s*=\s*"[^"]*\bhw\b[^"]*"[^>]*>\s*'
+    r'(?:[-–•*]\s*)?)'
+    r'(?:y/o|yo|4o)\b(?=[ \t]+\S)')
+# HTML variant 2: at the start of any block element (optionally through
+# inline wrapper tags and a bullet) — covers layouts that don't use the
+# hw class. Never fires mid-sentence.
+_SHORTHAND_HTML_BLOCK_RX = re.compile(
+    r'(?is)((?:\A|<(?:div|p|li|td|th|h[1-6])[^>]*>|<br\s*/?>)\s*'
+    r'(?:<[^>]+>\s*)*(?:[-–•*]\s*)?)'
     r'(?:y/o|yo|4o)\b(?=[ \t]+\S)')
 
 
 def _fix_shorthand(text: str) -> str:
-    return _SHORTHAND_LINE_RX.sub("C/o", text) if text else text
+    return _SHORTHAND_LINE_RX.sub(r"\1C/o", text) if text else text
 
 
 def _fix_shorthand_html(html: str) -> str:
-    return _SHORTHAND_HTML_RX.sub(r"\1C/o", html) if html else html
+    if not html:
+        return html
+    html = _SHORTHAND_HTML_RX.sub(r"\1C/o", html)
+    return _SHORTHAND_HTML_BLOCK_RX.sub(r"\1C/o", html)
 
 
 def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
@@ -2497,6 +2533,7 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
             layout_error = None
 
     if _VERIFY and text and ("cjk" in quality_flags
+                             or _header_suspect(text)
                              or _page_has_handwriting(text, layout_html)):
         text, layout_html = _verify_completeness(
             b64_image, page_num, text, layout_html)

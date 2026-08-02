@@ -641,6 +641,73 @@
       }
     }
 
+    // ── Word export ──────────────────────────────────────────────
+    // Builds an MHTML (.doc) document from the reconstructed layouts.
+    // Word opens MHTML natively; embedded crops travel as MIME parts
+    // because Word does not reliably render data: URIs. Pure function
+    // (strings in/out) so it stays testable outside the browser.
+    function buildWordMht(pages) {
+      const css =
+        "body { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; color: #1f2937; }" +
+        "table { border-collapse: collapse; margin: 6px 0; }" +
+        "td, th { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 12px; }" +
+        ".stamp { border: 1.5px dashed #9333ea; color: #9333ea; padding: 2px 8px; font-size: 11px; }" +
+        ".unc { background: #fde047; font-weight: bold; }" +
+        ".checklist { border: 1.5px solid #64748b; padding: 8px 10px; margin: 6px 0; }" +
+        "img { max-width: 100%; }" +
+        "h3.pg { color: #475569; font-size: 12px; border-bottom: 1px solid #cbd5e1; padding-bottom: 2px; }";
+      const images = [];
+      const body = pages.map((p, i) => {
+        let html = pageFragment(p).replace(
+          /src\s*=\s*"data:image\/(jpeg|png|gif);base64,([^"]+)"/gi,
+          (m, type, b64) => {
+            const name = "img" + images.length + "." + (type === "jpeg" ? "jpg" : type);
+            images.push({ loc: "http://localhost/" + name, mime: "image/" + type, b64: b64 });
+            return 'src="http://localhost/' + name + '"';
+          }
+        );
+        const header = pages.length > 1 ? '<h3 class="pg">Page ' + p.page + "</h3>" : "";
+        const brk = i < pages.length - 1 ? '<br clear="all" style="page-break-before:always">' : "";
+        return "<div>" + header + html + "</div>" + brk;
+      }).join("");
+      const htmlDoc =
+        '<html xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+        'xmlns:w="urn:schemas-microsoft-com:office:word">' +
+        '<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8">' +
+        "<style>" + css + "</style></head><body>" + body + "</body></html>";
+      const B = "----=_NextPart_Extract";
+      let mht =
+        "MIME-Version: 1.0\r\n" +
+        'Content-Type: multipart/related; boundary="' + B + '"; type="text/html"\r\n' +
+        "\r\n--" + B + "\r\n" +
+        'Content-Type: text/html; charset="utf-8"\r\n' +
+        "Content-Location: http://localhost/doc.html\r\n" +
+        "\r\n" + htmlDoc + "\r\n";
+      images.forEach((im) => {
+        mht +=
+          "\r\n--" + B + "\r\n" +
+          "Content-Type: " + im.mime + "\r\n" +
+          "Content-Transfer-Encoding: base64\r\n" +
+          "Content-Location: " + im.loc + "\r\n" +
+          "\r\n" + im.b64.replace(/(.{76})/g, "$1\r\n") + "\r\n";
+      });
+      mht += "\r\n--" + B + "--\r\n";
+      return mht;
+    }
+
+    function downloadWord(doc) {
+      const pages = (doc.result && doc.result.pages) || [];
+      if (!pages.length) { alert("No extracted pages to export."); return; }
+      const mht = buildWordMht(pages);
+      const blob = new Blob([mht], { type: "application/msword" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (doc.file.name.replace(/\.[^.]+$/, "") || "document") + "_extracted.doc";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
     function FieldsTable({ fields }) {
       return (
         <div className="overflow-x-auto">
@@ -744,7 +811,6 @@
       const keyActionsRef = useRef({});
       const url = React.useMemo(() => URL.createObjectURL(file), [file]);
       const isPdf = /\.pdf$/i.test(file.name);
-      const meta = (result && result.meta) || {};
       const pages = (result && result.pages) || [];
       const curIdx = Math.min(pageIdx, Math.max(pages.length - 1, 0));
       const page = pages[curIdx] || null;
@@ -1009,26 +1075,31 @@
               )}
             </div>
             {done && (
-              <div className="px-5 py-3 border-t border-line/60 flex flex-wrap gap-2">
-                {meta.engine && (
-                  <span className="text-[11px] font-medium text-primary-deep bg-mint-2 rounded-full px-3 py-1">
-                    {meta.engine}
-                  </span>
-                )}
+              <div className="px-5 py-3 border-t border-line/60 flex flex-wrap gap-2 items-center">
                 <span className="text-[11px] font-medium text-primary-deep bg-mint-2 rounded-full px-3 py-1">
                   {pages.length} page{pages.length === 1 ? "" : "s"}
                 </span>
-                <button
-                  onClick={handleDownloadPdf}
-                  disabled={pdfBusy}
-                  className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium text-primary-deep bg-mint-2 rounded-full px-3 py-1 hover:bg-mint transition disabled:opacity-60 disabled:cursor-wait"
-                  title="Download the reconstructed layout of every page as a single PDF"
-                >
-                  <span className={"material-symbols-outlined text-sm" + (pdfBusy ? " animate-spin" : "")}>
-                    {pdfBusy ? "progress_activity" : "download"}
-                  </span>
-                  {pdfBusy ? "Rendering " + pdfNote : "Download PDF"}
-                </button>
+                <div className="ml-auto flex items-center gap-2">
+                  <button
+                    onClick={handleDownloadPdf}
+                    disabled={pdfBusy}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-primary-deep bg-mint-2 rounded-full px-3 py-1 hover:bg-mint transition disabled:opacity-60 disabled:cursor-wait"
+                    title="Download the reconstructed layout of every page as a single PDF"
+                  >
+                    <span className={"material-symbols-outlined text-sm" + (pdfBusy ? " animate-spin" : "")}>
+                      {pdfBusy ? "progress_activity" : "picture_as_pdf"}
+                    </span>
+                    {pdfBusy ? "Rendering " + pdfNote : "PDF"}
+                  </button>
+                  <button
+                    onClick={() => downloadWord(doc)}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-primary-deep bg-mint-2 rounded-full px-3 py-1 hover:bg-mint transition"
+                    title="Download the reconstructed layout of every page as a Word document"
+                  >
+                    <span className="material-symbols-outlined text-sm">description</span>
+                    Word
+                  </button>
+                </div>
               </div>
             )}
           </div>
