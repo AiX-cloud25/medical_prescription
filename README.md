@@ -1,19 +1,11 @@
-# Offline Prescription Extractor
+# Medical Prescription Extraction (Offline)
 
 Extracts text, layout, and structured data from doctor prescriptions
 (image or PDF) using an **offline Ollama vision model**
 (`qwen2.5vl:72b` in production on a GPU box; `qwen2.5vl:7b` /
 `qwen3-vl:4b-instruct` for local dev). No cloud AI APIs — only the
-optional Azure SQL feedback store leaves the machine.
-
-One of three sibling demo projects — same UI family, different ports so
-they can run simultaneously:
-
-| Project | Engine | Port |
-|---|---|---|
-| `doctor_prescription_gpt_extractor` | Azure OpenAI GPT vision | 8001 |
-| **`doctor_prescription_offline_extractor`** | **qwen2.5-VL via Ollama (offline)** | **8002** |
-| `doctor_prescription_azure_extractor` | Azure Document Intelligence | 8003 |
+optional Azure SQL feedback store leaves the machine. Runs on port
+**8002**.
 
 ## Files
 
@@ -105,9 +97,9 @@ Human edits (Edit-in-layout → Save) are stored per document
 (`raw_corrections`, keyed by file hash) and replayed on re-upload;
 word-level pairs feed few-shot spelling examples into future prompts;
 pairs confirmed 3+ times become deterministic dictionary rules
-(Dictionary panel in the UI). Schema `PrescriptionExtractionOffline` —
-separate from the GPT sibling so each model learns from its own
-mistakes. DB unreachable = extraction still works, learning disabled.
+(Dictionary panel in the UI). Everything lives in its own SQL schema,
+`PrescriptionExtractionOffline`. DB unreachable = extraction still
+works, learning disabled.
 
 ## Setup
 
@@ -184,4 +176,5 @@ page**, and the small models are a wiring test only: they under-mark
 uncertainty, miss diagrams, and ignore layout rules the 72B follows.
 Judge extraction quality only on the 72B.
 
-This project is fully self-contained — no imports from sibling folders.
+This project is fully self-contained — everything it needs is in this
+repository.

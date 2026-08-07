@@ -1,10 +1,8 @@
 ﻿"""
 extractor.py — Offline VLM engine via Ollama (qwen2.5-VL)
 ─────────────────────────────────────────────────────────
-Started as a clone of doctor_prescription_gpt_extractor with the model
-layer swapped from Azure OpenAI to Ollama; has since grown its own
-multi-pass pipeline (see README "Extraction pipeline" for the full
-per-page order):
+Multi-pass extraction pipeline for medical prescription pages (see
+README "Extraction pipeline" for the full per-page order):
 
   render 300 DPI → upright → combined raw+layout read (retry nudges,
   CJK-garbage gate) → sparse-page rotation rescue → verify pass
