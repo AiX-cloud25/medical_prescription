@@ -1,14 +1,17 @@
 ﻿"""
-extractor.py — Offline VLM engine via Ollama (qwen2.5vl)
-────────────────────────────────────────────────────────
-Identical pipeline to the sibling doctor_prescription_gpt_extractor —
-same prompts, same combined transcript+layout pass, same structured-fields
-pass, same feedback learning — with the ONLY difference being the vision
-model: a local Ollama model (default qwen2.5vl:7b) instead of Azure OpenAI.
+extractor.py — Offline VLM engine via Ollama (qwen2.5-VL)
+─────────────────────────────────────────────────────────
+Started as a clone of doctor_prescription_gpt_extractor with the model
+layer swapped from Azure OpenAI to Ollama; has since grown its own
+multi-pass pipeline (see README "Extraction pipeline" for the full
+per-page order):
 
-Strategy:
-  • Image (jpg/png/webp) → sent to the model as raw base64 (Ollama format).
-  • PDF → each page rendered to JPEG (pypdfium2, 150 DPI) and sent per page.
+  render 300 DPI → upright → combined raw+layout read (retry nudges,
+  CJK-garbage gate) → sparse-page rotation rescue → verify pass
+  (missed lines) → header recovery (top strip) → diagram detection +
+  crop verification + merge → deterministic repairs (C/o shorthand,
+  checklist container) → regional-script translation → (?) uncertainty
+  wrapping → region crop embedding.
 
 Public API:
     extract(data, ext) → (pages, extras, meta)
