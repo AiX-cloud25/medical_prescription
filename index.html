@@ -371,7 +371,7 @@
         "td, th { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 12px; }" +
         ".hw { font-family: inherit; color: inherit; }" +
         ".stamp { display: inline-block; border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; transform: rotate(-2deg); margin: 2px; }" +
-        ".unc { background: #fde047; outline: 1.5px solid #f59e0b; border-radius: 3px; padding: 0 2px; font-weight: 600; }" +
+        ".unc { color: #dc2626; font-weight: 700; }" +
         "img.cut { max-width: 100%; height: auto; border-radius: 4px; }" +
         "img.cut:not([src]) { border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; min-height: 18px; }" +
         "</style></head><body>" + fragment + "</body></html>"
@@ -652,7 +652,7 @@
         "table { border-collapse: collapse; margin: 6px 0; }" +
         "td, th { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 12px; }" +
         ".stamp { border: 1.5px dashed #9333ea; color: #9333ea; padding: 2px 8px; font-size: 11px; }" +
-        ".unc { background: #fde047; font-weight: bold; }" +
+        ".unc { color: #dc2626; font-weight: bold; }" +
         ".checklist { border: 1.5px solid #64748b; padding: 8px 10px; margin: 6px 0; }" +
         "img { max-width: 100%; }" +
         "h3.pg { color: #475569; font-size: 12px; border-bottom: 1px solid #cbd5e1; padding-bottom: 2px; }";
@@ -1056,12 +1056,12 @@
                         ) : uncCount > 0 ? (
                           <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-3 py-1">
                             <span className="material-symbols-outlined text-sm">warning</span>
-                            {uncCount} uncertain word{uncCount === 1 ? "" : "s"} highlighted in yellow — please verify {uncCount === 1 ? "it" : "these"}
+                            {uncCount} word{uncCount === 1 ? "" : "s"} in red — please verify {uncCount === 1 ? "it" : "these"} and correct via Edit
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
                             <span className="material-symbols-outlined text-sm">check_circle</span>
-                            No uncertain words on this page
+                            No words flagged for review on this page
                           </span>
                         )}
                       </div>

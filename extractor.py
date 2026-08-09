@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-09-r5"
+EXTRACTOR_BUILD = "2026-08-09-r6"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -514,6 +514,9 @@ ACCURACY RULES
 - Preserve slashes (10452/25 remains 10452/25).
 - Use (?) for uncertain words.
 - Never use [illegible].
+- Never reproduce ink colors — output plain unstyled text regardless of
+  pen color (no color or background styles); highlighting is added by
+  the system.
 """
 
 _LAYOUT_USER = (
@@ -832,13 +835,24 @@ def _sanitize_html(fragment: str) -> str:
     fragment = re.sub(r"<button\b.*?</button\s*>", "", fragment,
                       flags=re.IGNORECASE | re.DOTALL)
 
+    # Models sometimes mimic pen ink with <font> tags — drop the tags,
+    # keep the content (all color comes from our CSS classes instead).
+    fragment = re.sub(r"</?font\b[^>]*>", "", fragment, flags=re.IGNORECASE)
+
     # Overlap guard: absolute/fixed positioning and negative margins make
-    # text render on top of other text — force everything into normal flow.
+    # text render on top of other text — force everything into normal
+    # flow. Color guard: strip color/background declarations so red-ink
+    # handwriting never comes out red — in this UI red means "flagged
+    # word", and everything else must be plain black.
     def _defuse_style(m):
         style = m.group(2)
         style = re.sub(r"position\s*:\s*(absolute|fixed)", "position:static",
                        style, flags=re.IGNORECASE)
         style = re.sub(r"margin(?:-\w+)?\s*:\s*-[^;]*;?", "", style,
+                       flags=re.IGNORECASE)
+        style = re.sub(r"(?:background-)?color\s*:\s*[^;]*;?", "", style,
+                       flags=re.IGNORECASE)
+        style = re.sub(r"background\s*:\s*[^;]*;?", "", style,
                        flags=re.IGNORECASE)
         return f"style={m.group(1)}{style}{m.group(1)}"
 
@@ -2546,6 +2560,116 @@ def _should_detect(text: str, layout_html: str) -> bool:
         r'class\s*=\s*["\'][^"\']*\bcut\b', layout_html))
 
 
+# ── Wrong-word audit pass ────────────────────────────────────────────
+# Self-marked (?) uncertainty has a ceiling: a model that misreads
+# confidently never marks itself. This pass shows the model the finished
+# transcript AS ANOTHER TRANSCRIBER'S WORK next to the page image and
+# asks it to flag words that don't match — the critic framing removes
+# the self-agreement bias. Flagged words are MARKED (gain a "(?)" and
+# thus the red highlight), never silently replaced: the client corrects.
+_AUDIT = os.getenv("AUDIT_WORDS", "1").strip().lower() in (
+    "1", "true", "yes", "on")
+
+_AUDIT_SYSTEM = (
+    "You are checking ANOTHER transcriber's work. You receive one medical "
+    "document page image and their NUMBERED transcription of it. Compare "
+    "every line against the image and report words that are WRONG or "
+    "doubtful — misread handwriting, wrong numbers or dosages, wrong "
+    "clinical shorthand. Do NOT report correct words, formatting, "
+    "spacing, or style choices. Do NOT report words already marked "
+    "with (?). "
+    'Output ONLY JSON: {"wrong": [{"line": <line number>, '
+    '"word": "<the exact word as transcribed>", '
+    '"correct": "<your best reading from the image>"}]}. '
+    'Maximum 25 entries. If everything matches, output {"wrong": []}.'
+)
+
+_AUDIT_USER = (
+    "Their transcription of page {page} (numbered):\n\n{numbered}\n\n"
+    "Compare it word by word against the page image and return the "
+    "JSON now."
+)
+
+
+def _audit_words(b64_image: str, page_num: int, text: str,
+                 layout_html: str) -> tuple:
+    """
+    One critic call that flags misread words. Each accepted flag appends
+    "(?)" to the word in text AND layout, so the existing _wrap_uncertain
+    pipeline turns it into a highlighted span. Marks only — never
+    replaces the transcribed word. Never raises.
+    """
+    try:
+        lines = text.splitlines()
+        numbered = "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(lines))
+        raw, _ = _ollama_chat(
+            _AUDIT_SYSTEM,
+            _AUDIT_USER.format(page=page_num, numbered=numbered),
+            [b64_image],
+            1500,
+            json_mode=True,
+        )
+        entries = (_parse_json_loose(raw) if raw else {}).get("wrong") or []
+        if not isinstance(entries, list):
+            return text, layout_html
+
+        flagged = []
+        for e in entries[:25]:
+            if not isinstance(e, dict):
+                continue
+            word = str(e.get("word") or "").strip()
+            sugg = str(e.get("correct") or "").strip()
+            if not word or len(word) < 2 or "(?)" in word:
+                continue
+            try:
+                ln_no = int(e.get("line", 0)) - 1
+            except (TypeError, ValueError):
+                continue
+            # Whole word, not already followed by a (?) marker.
+            word_rx = re.compile(
+                r"(?<![A-Za-z0-9])" + re.escape(word)
+                + r"(?![A-Za-z0-9])(?!\(\?\))")
+            hit = None
+            for j in (ln_no, ln_no - 1, ln_no + 1):
+                if 0 <= j < len(lines) and word_rx.search(lines[j]):
+                    hit = j
+                    break
+            if hit is None:
+                continue  # auditor hallucinated a word — reject
+            lines[hit] = word_rx.sub(word + "(?)", lines[hit], count=1)
+            flagged.append((word, sugg))
+
+        if not flagged:
+            print(f"[INFO] Page {page_num}: audit found no wrong words")
+            return text, layout_html
+        text = "\n".join(lines)
+
+        # Layout: same word -> word(?) once, text nodes only (never
+        # inside tags/attributes).
+        if layout_html:
+            for word, _s in flagged:
+                rx = re.compile(
+                    r"(?<![A-Za-z0-9])" + re.escape(word)
+                    + r"(?![A-Za-z0-9])(?!\(\?\))")
+                parts = re.split(r"(<[^>]*>)", layout_html)
+                for idx, part in enumerate(parts):
+                    if part.startswith("<"):
+                        continue
+                    new_part, n = rx.subn(word + "(?)", part, count=1)
+                    if n:
+                        parts[idx] = new_part
+                        break
+                layout_html = "".join(parts)
+
+        summary = ", ".join(f"{w}→{s or '?'}" for w, s in flagged)
+        print(f"[INFO] Page {page_num}: audit flagged {len(flagged)} "
+              f"word(s): {summary}")
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: audit pass skipped ({e})")
+        return text, layout_html
+
+
 # ── Sparse-page rescue ───────────────────────────────────────────────
 # When a page comes back essentially empty, the most common cause is a
 # rotation the orientation probe missed. Outcome-triggered: retry the
@@ -2747,6 +2871,11 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
         dets, page_size = _detect_diagrams(b64_image, page_num)
         text, layout_html = _merge_diagram_boxes(
             text, layout_html, dets, page_size)
+    # Wrong-word audit: critic pass flags misread words with (?) so they
+    # come out red for the client to correct. Handwritten pages only.
+    if _AUDIT and text and _page_has_handwriting(text, layout_html):
+        text, layout_html = _audit_words(
+            b64_image, page_num, text, layout_html)
     text = _fix_shorthand(text)
     layout_html = _fix_shorthand_html(layout_html)
     layout_html = _ensure_checklist_container(text, layout_html)

@@ -24,8 +24,10 @@ optional Azure SQL feedback store leaves the machine. Runs on port
 1. **Upload** — drag & drop prescription images (JPG/PNG/WEBP) or PDFs;
    multiple files queue and extract one at a time (UI polls every 4 s).
 2. **Review** — original document beside the **Reconstructed Layout**:
-   - Uncertain words glow **yellow** (`(?)` marker) with a count chip —
-     the human reviews only those.
+   - Words needing review are shown in **red** (`(?)` marker — the
+     model's own doubts plus words flagged by the audit pass) with a
+     count chip; everything else renders pure black regardless of pen
+     ink color. The human reviews only the red words.
    - Hand-drawn clinical diagrams are cropped from the page and embedded
      at their original position (right-half drawings float right).
    - **Edit** makes the layout editable in place (Ctrl+Enter saves,
@@ -71,19 +73,25 @@ never fails the document. Log lines identify each pass.
    ones, and insert missed drawings anchored beside their annotations.
    Duplicate/nested boxes are union-merged (`_same_region`: IoU or
    intersection-over-smaller-box).
-7. **Deterministic repairs** (code, not model — identical every run):
+7. **Wrong-word audit** (`AUDIT_WORDS=1`) — a critic call sees the
+   finished transcript as ANOTHER transcriber's work beside the page
+   image and flags misread words (validated against the stated line,
+   marks only — never silently replaces); flagged words gain `(?)` and
+   come out red. Handwritten pages only.
+8. **Deterministic repairs** (code, not model — identical every run):
    - `C/o` shorthand: line-start `yo`/`y/o`/`4o` → `C/o`;
    - checklist container: "(Circle If Positive)" section wrapped in a
      bordered `.checklist` div if the model forgot;
    - prompt-echo guard + repetition collapse.
-8. **Language** — regional-script text (Kannada/Hindi/Tamil/…) is
+9. **Language** — regional-script text (Kannada/Hindi/Tamil/…) is
    translated to English by prompt rules (names transliterated, never
    translated); any residual non-Latin fragments (incl. CJK noise) get
    one text-only translate/clean call.
-9. **Uncertainty wrapping** — every `(?)` word is force-wrapped in
-   `<span class="unc">` server-side (yellow highlight never depends on
-   the model remembering the class).
-10. **Crop embedding** — `data-bbox` tags become real JPEG crops
+10. **Uncertainty wrapping** — every `(?)` word is force-wrapped in
+    `<span class="unc">` server-side (the red flagged-word styling never
+    depends on the model remembering the class). Ink colors from the
+    page are stripped — red in the output always means "verify this".
+11. **Crop embedding** — `data-bbox` tags become real JPEG crops
     (data: URIs) with position-mirroring float styles; logo-alt tags are
     deleted; pixel-coordinate boxes auto-convert to percentages.
 
@@ -136,6 +144,7 @@ deploying** (a stale `git pull` is otherwise invisible).
 | `VERIFY_MISSED_LINES` | 1 | Second completeness pass on handwritten pages |
 | `DETECT_DIAGRAMS` | 1 | Dedicated diagram grounding + crop verification |
 | `HEADER_CHECK` | 1 | Top-strip re-read on every page (`suspect` = only header-less pages, `0` = off) |
+| `AUDIT_WORDS` | 1 | Critic pass flags misread words in red (handwritten pages, `0` = off) |
 | `CROP_MAX_EDGE` / `CROP_PAD_PCT` | 500 / 4.0 | Crop size cap (px) / padding (page %) |
 | `MEDGEMMA_CORRECTION` | 0 | MedGemma spelling layer (kept off — the 72B makes it redundant) |
 | `SQL_*` | — | Azure SQL feedback store (optional) |
