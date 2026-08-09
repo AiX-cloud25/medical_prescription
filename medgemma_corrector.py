@@ -19,7 +19,10 @@ import requests
 
 _HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 _MODEL = os.getenv("MEDGEMMA_MODEL", "williamljx/medgemma-4b-it-Q4_K_M-GGUF")
-_ENABLED = os.getenv("MEDGEMMA_CORRECTION", "1").strip().lower() in ("1", "true", "yes", "on")
+# Disabled by default: the 72B extraction model makes this text-only
+# correction layer redundant, and it caused divergent output. Explicit
+# MEDGEMMA_CORRECTION=1 re-enables it.
+_ENABLED = os.getenv("MEDGEMMA_CORRECTION", "0").strip().lower() in ("1", "true", "yes", "on")
 _TIMEOUT = int(os.getenv("MEDGEMMA_TIMEOUT", "300"))
 _MAX_PAIRS = 15
 
