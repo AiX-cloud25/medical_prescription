@@ -57,9 +57,10 @@ never fails the document. Log lines identify each pass.
    (or `cjk`/header-suspect flags) are sent again with a numbered
    transcript; completely missed lines are merged back in at the right
    position. Printed-only clean pages skip this (no extra latency).
-5. **Header recovery** — if a page still starts with table rows (report
-   header skipped), the top 28% of the page image is transcribed
-   separately and missing letterhead/patient lines are prepended.
+5. **Header check** (`HEADER_CHECK=1`) — the top 30% of every page is
+   transcribed separately and any missing lines (UHID/tokens/titles,
+   letterhead, patient-details box) are prepended; pages the main read
+   got right are untouched (dedup by token overlap).
 6. **Diagram detection** (`DETECT_DIAGRAMS=1`) — a focused grounding
    call finds hand-drawn clinical drawings ONLY (anatomy sketches,
    lesion maps — never logos/emblems/barcodes/QR). Each candidate box is
@@ -134,6 +135,7 @@ deploying** (a stale `git pull` is otherwise invisible).
 | `OLLAMA_TIMEOUT` / `OLLAMA_NUM_CTX` | 900 / 32768 | Request timeout (s) / context window |
 | `VERIFY_MISSED_LINES` | 1 | Second completeness pass on handwritten pages |
 | `DETECT_DIAGRAMS` | 1 | Dedicated diagram grounding + crop verification |
+| `HEADER_CHECK` | 1 | Top-strip re-read on every page (`suspect` = only header-less pages, `0` = off) |
 | `CROP_MAX_EDGE` / `CROP_PAD_PCT` | 500 / 4.0 | Crop size cap (px) / padding (page %) |
 | `MEDGEMMA_CORRECTION` | 0 | MedGemma spelling layer (kept off — the 72B makes it redundant) |
 | `SQL_*` | — | Azure SQL feedback store (optional) |

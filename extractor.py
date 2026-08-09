@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-02-r4"
+EXTRACTOR_BUILD = "2026-08-09-r5"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -65,6 +65,19 @@ CORE RULES
 - Extract all visible printed text, handwriting, numbers, symbols,
   annotations, stamps, signatures and markings.
 - Do not skip any visible content.
+
+--------------------------------------
+TOP OF PAGE
+--------------------------------------
+
+Start your transcription at the VERY TOP EDGE of the page. Content
+printed near the top border is real page content, not background:
+URLs, UHID / ID numbers, barcode digits, room numbers, token numbers,
+visit dates, and page titles (e.g. OUT PATIENT RECORD). The photo may
+show clutter around the page (table surface, other papers) — ignore
+the clutter, but never skip text that is ON the page, however close
+to its edge. Before finishing, look at the top 15% of the page once
+more and confirm every line there appears in your output.
 
 2. NO HALLUCINATION
 - Output only content physically visible on the page.
@@ -162,6 +175,10 @@ Examples:
 Preserve slashes, punctuation and formatting exactly.
 (The names and numbers above are format examples only — never copy
 them into your output; always read the actual values from the page.)
+A printed label with no filled value is STILL output, as
+  Label : (blank)
+Never skip a label because it is empty (e.g. Clinical History,
+Examination Findings, Investigation, Diagnosis on an unfilled form).
 
 5. SECTION HEADINGS
 Preserve printed section headings in UPPERCASE.
@@ -1210,6 +1227,11 @@ _LOCAL_USER_RULES = (
     "transliterated, not translated).\n"
     "- Complaint lines start with C/o (Complains of) — never transcribed as "
     "\"y/o\" or \"40\".\n"
+    "- Your FIRST output line is the topmost visible text on the page — "
+    "IDs, UHID numbers, tokens, room numbers, URLs at the top edge "
+    "included.\n"
+    "- Printed labels with empty values are listed as Label : (blank), "
+    "never skipped.\n"
 )
 
 
@@ -2000,22 +2022,42 @@ def _page_has_handwriting(text: str, layout_html: str) -> bool:
     return "(?)" in (text or "")
 
 
+_SECTION_FIRST_RX = re.compile(
+    r"^(?:COMPLETE\s+)?(?:HAEMOGRAM|HAEMATOLOGY|BIOCHEMISTRY|"
+    r"DIFFERENTIAL\s+COUNT|.*\bREPORT)\s*$", re.IGNORECASE)
+
+
 def _header_suspect(text: str) -> bool:
     """
-    A printed report whose results table starts almost immediately —
-    the letterhead / report title / patient-details box at the top was
+    A printed report whose results start almost immediately — the
+    letterhead / report title / patient-details box at the top was
     probably skipped. Used to force the verify pass on such pages.
+    Suspect when a pipe-table row sits in the first 5 non-blank lines,
+    or the page OPENS with a results-section heading with no
+    Label : Value line before it.
     """
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-    return any(ln.count("|") >= 2 for ln in lines[:3])
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if any(ln.count("|") >= 2 for ln in lines[:5]):
+        return True
+    if lines and _SECTION_FIRST_RX.match(lines[0]) \
+            and not any(" : " in ln for ln in lines[:4]):
+        return True
+    return False
 
 
 # ── Targeted header recovery ─────────────────────────────────────────
-# When a page still looks header-less after the verify pass, read JUST
-# the top strip of the page image and prepend whatever lines are
-# missing. Focused single-region transcription is far more reliable
-# than asking the model to notice the omission on a full page.
-_HEADER_CROP_FRAC = 0.28
+# Read JUST the top strip of the page image and prepend whatever lines
+# the main read missed. Focused single-region transcription is far more
+# reliable than asking the model to notice an omission on a full page.
+# HEADER_CHECK: "1"/"always" (default) = run on every page — guarantees
+# top-of-page content every run; "suspect" = only when _header_suspect
+# fires (legacy, lower latency); "0" = off.
+_HEADER_CHECK = os.getenv("HEADER_CHECK", "1").strip().lower()
+if _HEADER_CHECK in ("1", "true", "yes", "on"):
+    _HEADER_CHECK = "always"
+elif _HEADER_CHECK not in ("suspect", "always"):
+    _HEADER_CHECK = "off"
+_HEADER_CROP_FRAC = 0.30
 _HEADER_SYSTEM = (
     "You transcribe the TOP region of a medical document page. It "
     "typically contains the letterhead / facility name, a report title, "
@@ -2694,9 +2736,11 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
                              or _page_has_handwriting(text, layout_html)):
         text, layout_html = _verify_completeness(
             b64_image, page_num, text, layout_html)
-    # Still header-less after the verify pass → read the top strip
-    # directly and prepend what's missing.
-    if text and _header_suspect(text):
+    # Top-strip check: guarantees top-of-page content (IDs, tokens,
+    # titles, patient box) survives every run. "always" mode runs it on
+    # every page — the merge only prepends genuinely missing lines.
+    if text and (_HEADER_CHECK == "always"
+                 or (_HEADER_CHECK == "suspect" and _header_suspect(text))):
         text, layout_html = _recover_header(
             b64_image, page_num, text, layout_html)
     if _DETECT_DIAGRAMS and text and _should_detect(text, layout_html):
