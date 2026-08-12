@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-12-r7"
+EXTRACTOR_BUILD = "2026-08-12-r8"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -207,6 +207,14 @@ out: repeat the applicable range on EVERY row it covers. Example:
   Hematocrit  | 39.1 | 35 - 55 %
 (Each row still gets its OWN reference range, even when the source page
 prints the ranges as one grouped block to the right of several rows.)
+
+Only the ACTUAL results grid (rows with a test name, a result, and a
+range) is formatted this way. The facility name, report title, and
+patient-details box printed ABOVE the grid are NOT part of the table —
+keep them as plain lines / Label : Value lines before the pipe rows,
+never inside them.
+Never add a caption, title, or label for the table itself (e.g. never
+output "Table 1" or "Table:") — output the rows directly, nothing else.
 
 7. NARRATIVE TEXT
 For paragraphs, clinic notes and histories:
@@ -443,6 +451,10 @@ of single-line divs. If the printed Reference Range column visually
 spans several test rows as one merged block, still give EVERY <tr>
 its own <td> with the applicable range repeated — never one giant
 range cell spanning multiple rows, never a stack of un-tabled divs.
+The facility name, report title, and patient-details box printed
+ABOVE the grid go BEFORE the <table> as plain divs/label:value pairs
+— never as rows inside it, and never all merged into one column.
+Never output a caption/heading for the table (e.g. never "Table 1").
 Prescription pages and handwritten clinic notes must NOT be converted
 into tables — render them as a header, label:value lines, and
 line-by-line notes in the order written on the page.
@@ -747,7 +759,16 @@ registration numbers, dates, or doctor names. Transcribe exactly as written.
 9. EMPTY DOCUMENTS
 If no fields are found: {"fields": [], "medicines": []}
 
-10. LANGUAGE
+10. FACILITY NAME PER PAGE
+A multi-page document may combine pages from DIFFERENT facilities (a
+hospital's own pages plus referred/external lab or imaging reports).
+facility_name reflects the letterhead actually printed on the page(s)
+that field's value came from — never assume every page shares the
+facility name seen on page 1. If a page's letterhead is genuinely
+partially covered or cut off, transcribe only the visible fragment
+rather than completing it into a full name from another page.
+
+11. LANGUAGE
 Narrative/free-text field values (e.g. chief_complaints, diagnosis,
 family_history, advice, instructions) written in a regional script are
 translated into English. Proper-noun fields (patient_name, doctor_name,
@@ -984,7 +1005,8 @@ _LOGO_ALT_RX = re.compile(
 # deterministically, on top of the prompt wording and the crop verifier.
 _ANATOMY_RX = re.compile(
     r"breast|chest|abdomen|limb|organ|lesion|tumou?r|mass|outline|"
-    r"sketch|anatomy|body|nodule|cyst", re.IGNORECASE)
+    r"sketch|anatomy|body|nodule|cyst|face|facial|cheek|neck|skin|"
+    r"swelling|growth|nodal|node|site|region|scar", re.IGNORECASE)
 
 
 def _normalize_bbox(x, y, w, h, pw, ph):
@@ -1206,7 +1228,17 @@ _LOCAL_RULES = (
 
     "8. PRESERVE ORIGINAL STRUCTURE\n"
     "Maintain section headings, labels, field names, ordering, and document hierarchy "
-    "exactly as they appear on the page whenever possible.\n\n"
+    "exactly as they appear on the page whenever possible.\n"
+    "Never invent a section heading that is not printed on the page, and never "
+    "move content under a different heading than the one it is written "
+    "under. If a numbered list (e.g. under INVESTIGATION) has an item "
+    "written in a slightly different hand or with a connecting arrow/line "
+    "at the end, it is still the NEXT numbered item of that SAME list — "
+    "keep it there. Only create a DIAGNOSIS or PROPOSED section when that "
+    "exact printed label exists on the page, and only place under it "
+    "content that is physically written at that label's own position. A "
+    "printed field with nothing written under it stays (blank) — do not "
+    "fill it with content that belongs to a different field.\n\n"
 
     "9. HANDWRITTEN CONTENT\n"
     "Extract handwritten text with the same importance as printed text.\n"
@@ -1717,12 +1749,13 @@ def read_page(
     last_err = None
     compact_nudge = ""
     cjk_nudge = ""
+    indic_nudge = ""
     for attempt in range(4):
         try:
             raw, done_reason = _ollama_chat(
                 system_prompt,
                 _PAGE_USER.format(page=page_num) + _LOCAL_USER_RULES
-                + compact_nudge + cjk_nudge,
+                + compact_nudge + cjk_nudge + indic_nudge,
                 [b64_image],
                 _PAGE_MAX_TOKENS,
             )
@@ -1756,6 +1789,28 @@ def read_page(
                 # Last attempt still garbled — fall through to the
                 # text-only fallback below for an independent chance.
                 text, layout = None, None
+
+            # Regional-script (Kannada/Hindi/Tamil/...) leftovers mean the
+            # LANGUAGE rule was ignored — nudge for a retry with full page
+            # context (much more reliable than the isolated-fragment
+            # cleanup pass that runs later as a backstop).
+            if text and _has_indic(text + (layout or "")):
+                quality_flags.add("indic")
+                print(f"[WARNING] Page {page_num}: output still contains "
+                      f"regional-script text, attempt {attempt + 1}/4")
+                indic_nudge = (
+                    " Your previous output still contained Kannada/Hindi/"
+                    "Tamil/Telugu or other regional-script characters — "
+                    "translate them into English now (transliterate names "
+                    "into Roman letters instead); output English/Roman "
+                    "characters ONLY."
+                )
+                if attempt < 3:
+                    time.sleep(3)
+                    continue
+                # Last attempt still has it — keep the text (unlike CJK,
+                # this may be genuine content); the residual-script
+                # translate pass gets a final chance at cleanup.
 
             if text:
                 if layout:
@@ -2010,6 +2065,77 @@ def _cjk_garbage(text: str) -> bool:
     return len(_CJK_RX.findall(text or "")) >= 3
 
 
+_INDIC_RX = re.compile(r"[ऀ-ൿ]")
+
+
+def _has_indic(text: str) -> bool:
+    """True when the text still carries any Indic-script character."""
+    return bool(_INDIC_RX.search(text or ""))
+
+
+# ── Optional offline MT library ──────────────────────────────────────
+# A dedicated translation model (trained specifically for kn/hi/ta/te/ml
+# -> en) is far more reliable than asking a general vision-language
+# model to translate an isolated fragment with no page context — this
+# is used automatically when installed, with the existing model-based
+# call as the fallback (nothing changes if it isn't installed).
+#
+# Setup (optional):
+#   pip install argostranslate
+#   python -c "import argostranslate.package as p; p.update_package_index(); \
+#     pkgs = p.get_available_packages(); \
+#     [p.install_from_path(x.download()) for x in pkgs \
+#      if x.from_code in ('kn','hi','ta','te','ml') and x.to_code == 'en']"
+try:
+    import argostranslate.translate as _argos_translate
+    _ARGOS_AVAILABLE = True
+    print("[INFO] argostranslate detected — will be used for regional-"
+          "script fragments when a matching language package is installed")
+except ImportError:
+    _argos_translate = None
+    _ARGOS_AVAILABLE = False
+
+# Unicode block -> ISO 639-1 code, for picking the right argos-translate
+# language pair per fragment.
+_SCRIPT_LANG_RANGES = (
+    (0x0C80, 0x0D00, "kn"),  # Kannada
+    (0x0900, 0x0980, "hi"),  # Devanagari (Hindi/Marathi)
+    (0x0B80, 0x0C00, "ta"),  # Tamil
+    (0x0C00, 0x0C80, "te"),  # Telugu
+    (0x0D00, 0x0D80, "ml"),  # Malayalam
+)
+
+
+def _guess_indic_lang(fragment: str):
+    for ch in fragment:
+        cp = ord(ch)
+        for lo, hi, code in _SCRIPT_LANG_RANGES:
+            if lo <= cp < hi:
+                return code
+    return None
+
+
+def _argos_translate_fragment(fragment: str):
+    """
+    Try the offline argos-translate library for one fragment. Returns
+    translated text, or None when unavailable/no matching language
+    package/translation failed — caller falls back to the model call.
+    Never raises.
+    """
+    if not _ARGOS_AVAILABLE:
+        return None
+    lang = _guess_indic_lang(fragment)
+    if not lang:
+        return None
+    try:
+        out = (_argos_translate.translate(fragment, lang, "en") or "").strip()
+        if out and out != fragment and not _NONLATIN_RUN_RX.search(out):
+            return out
+    except Exception as e:
+        print(f"[WARNING] argos-translate {lang}->en failed ({e})")
+    return None
+
+
 _TRANSLATE_SYSTEM = (
     "You translate fragments of regional-script or Chinese/Japanese text "
     "found in a medical document into English. Translate the MEANING into "
@@ -2040,14 +2166,40 @@ def _translate_residual_scripts(page_num: int, text: str,
                 break
         if not frags:
             return text, layout_html
+
+        # Prefer the dedicated offline MT library per fragment (better
+        # quality, no model call needed); only the leftovers go to Ollama.
+        applied = 0
+        remaining = []
+        for f in frags:
+            eng = _argos_translate_fragment(f)
+            if eng is None:
+                remaining.append(f)
+                continue
+            replaced = False
+            if text and f in text:
+                text = text.replace(f, eng)
+                replaced = True
+            if layout_html and f in layout_html:
+                layout_html = layout_html.replace(f, eng)
+                replaced = True
+            if replaced:
+                applied += 1
+        if len(remaining) < len(frags):
+            print(f"[INFO] Page {page_num}: argos-translate handled "
+                  f"{len(frags) - len(remaining)}/{len(frags)} fragment(s)")
+        if not remaining:
+            print(f"[INFO] Page {page_num}: translated/cleaned "
+                  f"{applied}/{len(frags)} residual non-Latin fragment(s)")
+            return text, layout_html
+
         user = ("Fragments:\n"
-                + "\n".join(f"{i + 1}. {f}" for i, f in enumerate(frags))
+                + "\n".join(f"{i + 1}. {f}" for i, f in enumerate(remaining))
                 + "\n\nReturn the JSON now.")
         raw, _ = _ollama_chat(_TRANSLATE_SYSTEM, user, [], 1500,
                               json_mode=True)
         entries = (_parse_json_loose(raw) if raw else {}).get(
             "translations") or []
-        applied = 0
         for e in entries:
             if not isinstance(e, dict):
                 continue
@@ -2296,22 +2448,60 @@ def _build_table_html(rows: list) -> str:
     return "".join(out)
 
 
+# A model-emitted "Table 1" / "Table:" caption line — pure LLM habit,
+# never real page content on these documents.
+_TABLE_CAPTION_RX = re.compile(r"(?im)^[ \t]*table[ \t]*\d*[ \t]*:?[ \t]*$")
+_TABLE_CAPTION_HTML_RX = re.compile(
+    r'(?is)<(div|p|h[1-6]|span|strong|b)\b[^>]*>\s*table[ \t]*\d*[ \t]*:?'
+    r'\s*</\1\s*>')
+
+
+def _strip_table_captions(text: str, layout_html: str) -> tuple:
+    """Remove a hallucinated 'Table 1' / 'Table:' caption line/element.
+    Never raises."""
+    try:
+        if text:
+            text = "\n".join(ln for ln in text.splitlines()
+                             if not _TABLE_CAPTION_RX.match(ln))
+        if layout_html:
+            layout_html = _TABLE_CAPTION_HTML_RX.sub("", layout_html)
+        return text, layout_html
+    except Exception:
+        return text, layout_html
+
+
 def _enforce_lab_tables(page_num: int, text: str, layout_html: str) -> tuple:
     """
     Guaranteed fallback: when the extracted text clearly contains a
-    pipe-table block but the layout has no real <table> for it, build
-    one deterministically and splice it in (anchored on the block's
-    first/last line, else appended). Never touches a layout that
-    already has a <table> — only steps in when the model produced none
-    for content that is unmistakably tabular. Never raises.
+    pipe-table block but the layout has no real <table> for it — or has
+    one that is degenerate (far fewer cells than rows, e.g. the model
+    merged everything into one column) — build a correct one
+    deterministically and splice it in (anchored on the block's
+    first/last line, else appended). A properly multi-column model
+    table is left untouched. Never raises.
     """
-    if not text or not layout_html or "<table" in layout_html.lower():
+    if not text or not layout_html:
         return text, layout_html
     try:
         lines = text.splitlines()
         blocks = _looks_like_table_block(lines)
         if not blocks:
             return text, layout_html
+
+        low = layout_html.lower()
+        if "<table" in low:
+            total_rows = sum(end - start for start, end in blocks)
+            cell_count = low.count("<td") + low.count("<th")
+            if cell_count >= 2 * total_rows:
+                return text, layout_html  # genuinely multi-column — leave it
+            print(f"[INFO] Page {page_num}: replacing a degenerate table "
+                  f"({cell_count} cells for {total_rows} row(s))")
+            # Documents in this pipeline have at most one results grid
+            # per page — drop it and rebuild below rather than risk
+            # splicing into malformed nested tags.
+            layout_html = re.sub(r"<table\b.*?</table\s*>", "", layout_html,
+                                 flags=re.IGNORECASE | re.DOTALL, count=1)
+
         for start, end in blocks:
             table_html = _build_table_html(lines[start:end])
             span_start = _find_anchor_span(layout_html, lines[start])
@@ -2563,13 +2753,18 @@ def _detect_diagrams(b64_image: str, page_num: int) -> tuple:
                     continue
                 # Bbox area alone can't catch reference marks (a circled
                 # digit + arrow + label inflates the box past the area
-                # floor). Require anatomy vocabulary in the detector's
-                # own description instead — a genuine drawing's
-                # description uses it; "circled 1 pointing to X" won't.
-                if not _ANATOMY_RX.search(desc):
+                # floor). Require anatomy vocabulary in the description,
+                # OR a substantive (>=2-word) labels field — reference
+                # marks are a single digit/letter ("1", "R"), while real
+                # drawings carry a real annotation phrase ("inflamed
+                # cyst", "entire breast indurated") even when the
+                # description itself doesn't happen to use listed words.
+                labels_word_count = len(
+                    str(e.get("labels") or "").split())
+                if not _ANATOMY_RX.search(desc) and labels_word_count < 2:
                     print(f"[INFO] Page {page_num}: diagram candidate "
-                          f"rejected — no anatomy vocabulary in "
-                          f"description ({desc!r})")
+                          f"rejected — no anatomy vocabulary and no "
+                          f"substantive labels ({desc!r})")
                     continue
                 # Same drawing reported twice (overlapping or nested
                 # boxes): merge into one covering box instead of keeping
@@ -2764,10 +2959,15 @@ _AUDIT_SYSTEM = (
     "You are checking ANOTHER transcriber's work. You receive one medical "
     "document page image and their NUMBERED transcription of it. Compare "
     "every line against the image and report words that are WRONG or "
-    "doubtful — misread handwriting, wrong numbers or dosages, wrong "
+    "doubtful — misread HANDWRITING, wrong numbers or dosages, wrong "
     "clinical shorthand. Do NOT report correct words, formatting, "
     "spacing, or style choices. Do NOT report words already marked "
-    "with (?). " + _NO_CROSS_PAGE_RULE + " "
+    "with (?). Printed or typed text — headings, titles, form labels — "
+    "is clearly legible and essentially never wrong; do NOT flag it "
+    "unless you can see an actual spelling error in the printed text "
+    "itself. Reserve flags for content that could plausibly be "
+    "misread: handwriting, numbers, dosages, and shorthand. When in "
+    "doubt about a printed word, do not flag it. " + _NO_CROSS_PAGE_RULE + " "
     'Output ONLY JSON: {"wrong": [{"line": <line number>, '
     '"word": "<the exact word as transcribed>", '
     '"correct": "<your best reading from the image>"}]}. '
@@ -2978,10 +3178,18 @@ def _ensure_checklist_container(text: str, layout_html: str) -> str:
                       if any(a in chunk_text(chunks[i])
                              for a in _CHECKLIST_END_ANCHORS)),
                      len(chunks))
-        wrapped = ('<div class="checklist">'
+        # Float the checklist left so the handwritten column that follows
+        # (complaints/history) naturally wraps beside it, matching the
+        # source form's two-column layout. A clearing div at the very
+        # end of the page bounds the float to this page only.
+        wrapped = ('<div class="checklist" '
+                   'style="float:left;width:46%;margin:0 3% 8px 0;'
+                   'box-sizing:border-box;">'
                    + "".join(chunks[start_i:end_i]) + "</div>")
-        print("[INFO] checklist container added programmatically")
-        return "".join(chunks[:start_i]) + wrapped + "".join(chunks[end_i:])
+        print("[INFO] checklist container added programmatically "
+              "(floated two-column)")
+        return ("".join(chunks[:start_i]) + wrapped
+               + "".join(chunks[end_i:]) + '<div style="clear:both"></div>')
     except Exception as e:
         print(f"[WARNING] checklist wrap skipped ({e})")
         return layout_html
@@ -3061,8 +3269,12 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
         dets, page_size = _detect_diagrams(b64_image, page_num)
         text, layout_html = _merge_diagram_boxes(
             text, layout_html, dets, page_size)
+    # Strip any hallucinated "Table 1" caption before table enforcement,
+    # so it can't get swept up as part of a spliced-in table's anchor.
+    text, layout_html = _strip_table_captions(text, layout_html)
     # Guaranteed table fallback: builds a real <table> in code when the
-    # text is clearly tabular but the model's own layout has none.
+    # text is clearly tabular but the model's own layout has none (or a
+    # degenerate one).
     text, layout_html = _enforce_lab_tables(page_num, text, layout_html)
     # Wrong-word audit: critic pass flags misread words with (?) so they
     # come out red for the client to correct. Handwritten pages only.

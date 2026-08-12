@@ -368,7 +368,7 @@
         "body { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; color: #1f2937; background: #fff; padding: 16px; margin: 0; }" +
         "table { border-collapse: collapse; margin: 6px 0; clear: both; }" +
         ".checklist { border: 1.5px solid #64748b; border-radius: 6px; padding: 8px 10px; margin: 6px 0; }" +
-        "td, th { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 12px; }" +
+        "td, th { border: 1px solid #cbd5e1; padding: 6px 10px; font-size: 12px; line-height: 1.5; }" +
         ".hw { font-family: inherit; color: inherit; }" +
         ".stamp { display: inline-block; border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; transform: rotate(-2deg); margin: 2px; }" +
         ".unc { color: #dc2626; font-weight: 700; }" +
@@ -618,9 +618,13 @@
           // width rather than shrunk to fit (dense pages stay readable).
           const sliceHpx = Math.floor((usableH / usableW) * canvas.width);
           for (let y = 0; y < canvas.height; y += sliceHpx) {
+            const hPx = Math.min(sliceHpx, canvas.height - y);
+            // A trailing sliver under 6% of a full slice is layout
+            // rounding/margin overflow, not real content — skip it
+            // rather than spawning a near-blank extra PDF page.
+            if (y > 0 && hPx < sliceHpx * 0.06) break;
             if (!firstPdfPage) pdf.addPage();
             firstPdfPage = false;
-            const hPx = Math.min(sliceHpx, canvas.height - y);
             const slice = document.createElement("canvas");
             slice.width = canvas.width;
             slice.height = hPx;
@@ -650,7 +654,7 @@
       const css =
         "body { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; color: #1f2937; }" +
         "table { border-collapse: collapse; margin: 6px 0; }" +
-        "td, th { border: 1px solid #cbd5e1; padding: 4px 8px; font-size: 12px; }" +
+        "td, th { border: 1px solid #cbd5e1; padding: 6px 10px; font-size: 12px; line-height: 1.5; }" +
         ".stamp { border: 1.5px dashed #9333ea; color: #9333ea; padding: 2px 8px; font-size: 11px; }" +
         ".unc { color: #dc2626; font-weight: bold; }" +
         ".checklist { border: 1.5px solid #64748b; padding: 8px 10px; margin: 6px 0; }" +

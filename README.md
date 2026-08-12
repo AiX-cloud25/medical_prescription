@@ -78,24 +78,32 @@ never fails the document. Log lines identify each pass.
    union-merged (`_same_region`: IoU or intersection-over-smaller-box).
 7. **Lab-table enforcement** — a deterministic code-level fallback:
    when the extracted text clearly contains a pipe-table block (≥3 rows)
-   but the model's own layout has no real `<table>` for it, one is built
-   in code and spliced in (anchored on the block's first/last line).
-   Never touches a layout that already has a table.
+   but the model's own layout has no real `<table>` for it — or has a
+   degenerate one (far fewer cells than rows, e.g. everything merged
+   into one column) — a correct one is built in code and spliced in
+   (anchored on the block's first/last line). A properly multi-column
+   model table is left untouched. A hallucinated "Table 1" caption line
+   is also stripped if the model adds one.
 8. **Wrong-word audit** (`AUDIT_WORDS=1`) — a critic call sees the
    finished transcript as ANOTHER transcriber's work beside the page
-   image and flags misread words (validated against the stated line,
-   marks only — never silently replaces); flagged words gain `(?)` and
-   come out red. Handwritten pages only.
+   image and flags misread HANDWRITING (never clearly-legible printed
+   text) with `(?)` — marks only, never silently replaces. Handwritten
+   pages only.
 9. **Deterministic repairs** (code, not model — identical every run):
    - `C/o` shorthand: line-start `yo`/`y/o`/`4o` → `C/o`;
    - checklist container: "(Circle If Positive)" section wrapped in a
-     bordered `.checklist` div if the model forgot;
+     bordered, left-floated `.checklist` div (so the handwritten
+     complaints/history column wraps beside it, matching the source
+     form) if the model forgot;
    - lab-table enforcement (above);
    - prompt-echo guard + repetition collapse.
 10. **Language** — regional-script text (Kannada/Hindi/Tamil/…) is
     translated to English by prompt rules (names transliterated, never
-    translated); any residual non-Latin fragments (incl. CJK noise) get
-    one text-only translate/clean call.
+    translated), with a same-attempt retry nudge if any survives.
+    Residual fragments (incl. CJK noise) get a cleanup pass that prefers
+    the optional offline `argostranslate` library per fragment (better
+    quality, no model call) and falls back to a text-only model call for
+    whatever it can't handle — see `requirements.txt` for setup.
 11. **Uncertainty wrapping** — every `(?)` word is force-wrapped in
     `<span class="unc">` server-side (the red flagged-word styling never
     depends on the model remembering the class). Ink colors from the

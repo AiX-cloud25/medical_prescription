@@ -6,3 +6,10 @@ Pillow>=10.0.0
 pypdfium2>=5.7.0
 requests>=2.31.0
 pymssql>=2.2
+
+# Optional: offline neural MT for regional-script (Kannada/Hindi/Tamil/...)
+# translation — better quality than the model-based fallback for isolated
+# fragments. Not required; the extractor works without it. After
+# installing, download language packages (see extractor.py's
+# _ARGOS_AVAILABLE comment for the one-time setup command).
+# argostranslate>=1.9
