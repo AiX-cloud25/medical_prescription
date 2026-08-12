@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-09-r6"
+EXTRACTOR_BUILD = "2026-08-12-r7"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -197,6 +197,16 @@ Maintain row order and column alignment.
 For printed lab/haematology/biochemistry reports: one pipe row per test,
 keeping Result and Reference Range in their own columns. Never flatten a
 results grid into one line per value or Label : Value pairs.
+
+Some reports print ONE reference-range block that visually spans SEVERAL
+test rows (the range column looks merged down the page). Split it back
+out: repeat the applicable range on EVERY row it covers. Example:
+  Test Name | Result | Reference Range
+  Haemoglobin | 12.8 | 11.0 - 14.0 gms%
+  RBC Count   | 4.7  | 3.6 - 4.6 x10^6/ul
+  Hematocrit  | 39.1 | 35 - 55 %
+(Each row still gets its OWN reference range, even when the source page
+prints the ranges as one grouped block to the right of several rows.)
 
 7. NARRATIVE TEXT
 For paragraphs, clinic notes and histories:
@@ -429,7 +439,10 @@ printed grid of rows and columns (lab / investigation reports).
 When the page IS a printed lab/haematology/biochemistry report, the
 results MUST be one real <table> with one <tr> per test and separate
 <td> cells for Test Name, Result, and Reference Range — never a stack
-of single-line divs.
+of single-line divs. If the printed Reference Range column visually
+spans several test rows as one merged block, still give EVERY <tr>
+its own <td> with the applicable range repeated — never one giant
+range cell spanning multiple rows, never a stack of un-tabled divs.
 Prescription pages and handwritten clinic notes must NOT be converted
 into tables — render them as a header, label:value lines, and
 line-by-line notes in the order written on the page.
@@ -964,6 +977,14 @@ _DIAGRAM_MATCH_IOU = 0.30
 _LOGO_ALT_RX = re.compile(
     r"logo|emblem|caduceus|symbol|barcode|qr\b|watermark|letterhead|"
     r"photo|seal|crest|icon", re.IGNORECASE)
+# A genuine anatomy drawing's own description uses this vocabulary (the
+# detector prompt asks it to describe what the drawing shows). A
+# reference mark — a circled digit/letter with an arrow to a word — has
+# none of it, so requiring a hit here rejects that whole failure class
+# deterministically, on top of the prompt wording and the crop verifier.
+_ANATOMY_RX = re.compile(
+    r"breast|chest|abdomen|limb|organ|lesion|tumou?r|mass|outline|"
+    r"sketch|anatomy|body|nodule|cyst", re.IGNORECASE)
 
 
 def _normalize_bbox(x, y, w, h, pw, ph):
@@ -1132,7 +1153,12 @@ _LOCAL_RULES = (
     "Do not omit any visible content.\n"
     "A large vertical gap between handwritten lines NEVER means the page is "
     "finished — scan all the way to the bottom edge; lines separated by wide "
-    "blank space are still part of the page and must be transcribed.\n\n"
+    "blank space are still part of the page and must be transcribed.\n"
+    "A line consisting of just one or two words, or written with wide "
+    "internal spacing between its own words, is NOT blank — extract it "
+    "exactly like any other line. Never skip a line because it looks "
+    "sparse or unusually spaced; unusual spacing is a handwriting habit, "
+    "not an empty row.\n\n"
 
     "3. \"CIRCLE IF POSITIVE\" CHECKLISTS\n"
     "When a section is labeled \"(Circle If Positive)\" and contains printed symptom or "
@@ -1226,6 +1252,8 @@ _LOCAL_USER_RULES = (
     "- Consecutive handwritten lines under a heading: ALL transcribed — "
     "count the lines on the page and match that count in your output, even "
     "when wide blank space separates them.\n"
+    "- Short (one or two word) lines and lines with wide internal spacing "
+    "are extracted, not skipped as if blank.\n"
     "- Hand-drawn clinical drawings (and ONLY those — no logos, emblems, "
     "barcodes, QR codes) each have one <img class=\"cut\" "
     "data-bbox=\"X,Y,W,H\"> tag in the HTML section, at their "
@@ -1910,6 +1938,23 @@ _VERIFY = os.getenv("VERIFY_MISSED_LINES", "1").strip().lower() in (
 # (Same pattern as backend._ANCHOR_GAP.)
 _ANCHOR_GAP = r"(?:<[^>]*>|[^A-Za-z0-9<])*"
 
+# Shared guard for every focused single-purpose call (verify/header/
+# audit) — these don't get the full _READ_SYSTEM prompt, so without
+# this they are the passes most prone to bleeding a letterhead/facility
+# name seen on an EARLIER page of a mixed document bundle into a LATER
+# page from a different facility (e.g. an external lab report pasted
+# into a hospital case file, with only a partial sticker/barcode
+# visible at its top).
+_NO_CROSS_PAGE_RULE = (
+    "This may be one page from a bundle of documents from DIFFERENT "
+    "facilities — never assume this page shares the same hospital, "
+    "letterhead, or facility name as any other page you may have seen. "
+    "Transcribe ONLY characters actually visible on THIS page image. If "
+    "a logo, sticker, or letterhead is partially covered, folded, or cut "
+    "off, transcribe only the visible fragment (or mark it (?) if "
+    "unclear) — never complete it into a full name from memory."
+)
+
 _VERIFY_SYSTEM = (
     "You are a transcription completeness checker for medical documents. "
     "You receive ONE page image and a NUMBERED transcription of that page. "
@@ -1925,6 +1970,7 @@ _VERIFY_SYSTEM = (
     "uncertain word. Any recovered line written in a regional script "
     "(Kannada, Hindi, Tamil, etc.) must be translated into English (names "
     "transliterated instead), the same as the rest of the transcription. "
+    + _NO_CROSS_PAGE_RULE + " "
     'Output ONLY JSON: {"missing": [{"after_line": <int>, "text": "<line>"}]} '
     "where after_line is the transcription line number that the missing "
     "line appears BELOW on the page (0 = above the first line). "
@@ -2079,8 +2125,15 @@ _HEADER_SYSTEM = (
     "top to bottom — facility lines as written, patient details as "
     "Label : Value lines. Plain text only, no markdown, no commentary. "
     "English/Roman characters only (translate or transliterate any "
-    "regional-script text)."
+    "regional-script text). " + _NO_CROSS_PAGE_RULE
 )
+
+
+def _alpha_tokens(s: str) -> set:
+    """Letters-only tokens (len>=2) — digit-agnostic, so two independent
+    misreads of the same handwritten value (different digits, same
+    labels/units) are still recognized as the same field."""
+    return set(re.findall(r"[a-z]{2,}", (s or "").lower()))
 
 
 def _recover_header(b64_image: str, page_num: int, text: str,
@@ -2103,8 +2156,10 @@ def _recover_header(b64_image: str, page_num: int, text: str,
             [hb64], 1200)
         if not raw or _cjk_garbage(raw):
             return text, layout_html
+        existing_lines = (text or "").splitlines()[:20]
         existing = [set(re.findall(r"[a-z0-9]+", ln.lower()))
-                    for ln in (text or "").splitlines()[:20]]
+                    for ln in existing_lines]
+        existing_alpha = [_alpha_tokens(ln) for ln in existing_lines]
         add = []
         for ln in raw.splitlines():
             ln = ln.strip()
@@ -2113,6 +2168,15 @@ def _recover_header(b64_image: str, page_num: int, text: str,
                 continue
             if any(t and len(toks & t) >= 0.6 * len(toks)
                    for t in existing):
+                continue
+            # Digit-agnostic pass: catches the same field re-read with
+            # different (misread) digits, e.g. "BP 130/80" vs "BP!-
+            # 120/80" — same labels/units, different numbers — so it
+            # isn't inserted as a spurious near-duplicate line.
+            cand_alpha = _alpha_tokens(ln)
+            if cand_alpha and any(
+                    a and len(cand_alpha & a) >= 0.5 * len(cand_alpha)
+                    for a in existing_alpha):
                 continue
             add.append(ln)
             if len(add) >= 12:
@@ -2155,6 +2219,114 @@ def _insert_html_after_anchor(layout_html: str, anchor_line: str,
         pos = bm.end() if bm else m.end()
         return layout_html[:pos] + new_block + layout_html[pos:]
     return layout_html + new_block
+
+
+def _find_anchor_span(layout_html: str, line: str):
+    """
+    Locate `line`'s tokens inside layout_html, trying progressively
+    shorter trailing-token suffixes (same strategy as
+    _insert_html_after_anchor). Returns (start, end) of the match or
+    None.
+    """
+    tokens = re.findall(r"[A-Za-z0-9]+", line or "")[-6:]
+    for k in range(len(tokens)):
+        anchor_rx = re.compile(
+            _ANCHOR_GAP.join(re.escape(w) for w in tokens[k:]),
+            re.IGNORECASE)
+        m = anchor_rx.search(layout_html)
+        if m:
+            return m.start(), m.end()
+    return None
+
+
+# ── Deterministic lab-table builder ──────────────────────────────────
+# Guaranteed fallback for tabular reports: the model has repeatedly
+# struggled with reference-range columns that visually merge across
+# several test rows. Rather than keep tuning the prompt, detect a clear
+# pipe-table block in the (already-extracted) text and, when the
+# model's own layout has no real <table> for it, build one in code.
+_TABLE_MIN_ROWS = 3
+
+
+def _looks_like_table_block(lines: list) -> list:
+    """Contiguous runs of >=2 lines each containing >=2 '|' characters,
+    with at least _TABLE_MIN_ROWS rows. Returns [(start, end), ...]
+    (end exclusive, indices into `lines`)."""
+    blocks = []
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.count("|") >= 2:
+            if start is None:
+                start = i
+        else:
+            if start is not None and i - start >= _TABLE_MIN_ROWS:
+                blocks.append((start, i))
+            start = None
+    if start is not None and len(lines) - start >= _TABLE_MIN_ROWS:
+        blocks.append((start, len(lines)))
+    return blocks
+
+
+def _build_table_html(rows: list) -> str:
+    """
+    Build a <table> from pipe-separated text rows. Column count is
+    taken from the header (first) row; short rows are padded, long
+    rows have their overflow merged into the last cell.
+    """
+    esc = (lambda s: s.replace("&", "&amp;").replace("<", "&lt;")
+           .replace(">", "&gt;").strip())
+    split_rows = [[c.strip() for c in r.split("|")] for r in rows]
+    n = len(split_rows[0]) if split_rows else 0
+    n = max(n, 1)
+
+    def _pad(cells):
+        if len(cells) < n:
+            return cells + [""] * (n - len(cells))
+        if len(cells) > n:
+            return cells[:n - 1] + [" ".join(cells[n - 1:])]
+        return cells
+
+    out = ["<table>"]
+    for ri, cells in enumerate(split_rows):
+        cells = _pad(cells)
+        tag = "th" if ri == 0 else "td"
+        cells_html = "".join(f"<{tag}>{esc(c)}</{tag}>" for c in cells)
+        out.append(f"<tr>{cells_html}</tr>")
+    out.append("</table>")
+    return "".join(out)
+
+
+def _enforce_lab_tables(page_num: int, text: str, layout_html: str) -> tuple:
+    """
+    Guaranteed fallback: when the extracted text clearly contains a
+    pipe-table block but the layout has no real <table> for it, build
+    one deterministically and splice it in (anchored on the block's
+    first/last line, else appended). Never touches a layout that
+    already has a <table> — only steps in when the model produced none
+    for content that is unmistakably tabular. Never raises.
+    """
+    if not text or not layout_html or "<table" in layout_html.lower():
+        return text, layout_html
+    try:
+        lines = text.splitlines()
+        blocks = _looks_like_table_block(lines)
+        if not blocks:
+            return text, layout_html
+        for start, end in blocks:
+            table_html = _build_table_html(lines[start:end])
+            span_start = _find_anchor_span(layout_html, lines[start])
+            span_end = _find_anchor_span(layout_html, lines[end - 1])
+            if span_start and span_end and span_end[1] >= span_start[0]:
+                layout_html = (layout_html[:span_start[0]] + table_html
+                               + layout_html[span_end[1]:])
+            else:
+                layout_html = layout_html + table_html
+            print(f"[INFO] Page {page_num}: enforced deterministic table "
+                  f"for {end - start} row(s)")
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: table enforcement skipped ({e})")
+        return text, layout_html
 
 
 def _insert_line_into_layout(layout_html: str, anchor_line: str,
@@ -2254,6 +2426,11 @@ _DIAGRAM_SYSTEM = (
     "- small shorthand symbols: a triangle/delta, arrows, ticks/check "
     "marks, circled words or numbers, brackets, underlines, plus/minus "
     "signs\n"
+    "- a small circle drawn around a single digit or letter, with an "
+    "arrow pointing to a word or phrase (e.g. a circled '1' or circled "
+    "'R' used as a footnote/reference marker) — this is NOT a drawing, "
+    "even though it has an arrow and a label like a real anatomy figure "
+    "would\n"
     "- hospital/clinic logos, letterhead emblems, medical symbols "
     "(caduceus, cross), barcodes, QR codes, stamps, signatures, "
     "watermarks, printed graphics or charts, photographs.\n"
@@ -2287,7 +2464,10 @@ _DIAGRAM_VERIFY_SYSTEM = (
     "crossed-out.\n"
     "symbol — the crop contains only a small shorthand mark: a "
     "triangle/delta, arrow, tick, circled word or number, bracket, "
-    "underline, or plus/minus sign.\n"
+    "underline, or plus/minus sign. A small circle around a single "
+    "digit or letter with an arrow to a word (a footnote/reference "
+    "marker, e.g. circled '1' or circled 'R') is a symbol, not a "
+    "drawing, even though it has an arrow and a label.\n"
     "Distinguish carefully: a circle or loop drawn AROUND an existing "
     "word or number (to select or highlight it) is text/symbol — but "
     "circles or ovals drawn as SHAPES representing anatomy (e.g. one or "
@@ -2380,6 +2560,16 @@ def _detect_diagrams(b64_image: str, page_num: int) -> tuple:
                     continue
                 desc = str(e.get("description") or "").strip()
                 if _LOGO_ALT_RX.search(desc):
+                    continue
+                # Bbox area alone can't catch reference marks (a circled
+                # digit + arrow + label inflates the box past the area
+                # floor). Require anatomy vocabulary in the detector's
+                # own description instead — a genuine drawing's
+                # description uses it; "circled 1 pointing to X" won't.
+                if not _ANATOMY_RX.search(desc):
+                    print(f"[INFO] Page {page_num}: diagram candidate "
+                          f"rejected — no anatomy vocabulary in "
+                          f"description ({desc!r})")
                     continue
                 # Same drawing reported twice (overlapping or nested
                 # boxes): merge into one covering box instead of keeping
@@ -2577,7 +2767,7 @@ _AUDIT_SYSTEM = (
     "doubtful — misread handwriting, wrong numbers or dosages, wrong "
     "clinical shorthand. Do NOT report correct words, formatting, "
     "spacing, or style choices. Do NOT report words already marked "
-    "with (?). "
+    "with (?). " + _NO_CROSS_PAGE_RULE + " "
     'Output ONLY JSON: {"wrong": [{"line": <line number>, '
     '"word": "<the exact word as transcribed>", '
     '"correct": "<your best reading from the image>"}]}. '
@@ -2871,6 +3061,9 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
         dets, page_size = _detect_diagrams(b64_image, page_num)
         text, layout_html = _merge_diagram_boxes(
             text, layout_html, dets, page_size)
+    # Guaranteed table fallback: builds a real <table> in code when the
+    # text is clearly tabular but the model's own layout has none.
+    text, layout_html = _enforce_lab_tables(page_num, text, layout_html)
     # Wrong-word audit: critic pass flags misread words with (?) so they
     # come out red for the client to correct. Handwritten pages only.
     if _AUDIT and text and _page_has_handwriting(text, layout_html):

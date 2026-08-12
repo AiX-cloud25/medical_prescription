@@ -65,35 +65,51 @@ never fails the document. Log lines identify each pass.
    got right are untouched (dedup by token overlap).
 6. **Diagram detection** (`DETECT_DIAGRAMS=1`) — a focused grounding
    call finds hand-drawn clinical drawings ONLY (anatomy sketches,
-   lesion maps — never logos/emblems/barcodes/QR). Each candidate box is
-   then **crop-verified** by a second small call (drawing / text /
-   symbol); only explicit "drawing" survives (fail-closed — a wrong
-   handwriting crop is worse than a missed diagram). Detector boxes are
-   authoritative: they re-box matched layout tags, delete unconfirmed
-   ones, and insert missed drawings anchored beside their annotations.
-   Duplicate/nested boxes are union-merged (`_same_region`: IoU or
-   intersection-over-smaller-box).
-7. **Wrong-word audit** (`AUDIT_WORDS=1`) — a critic call sees the
+   lesion maps — never logos/emblems/barcodes/QR). A candidate must
+   also use anatomy vocabulary in its own description (`_ANATOMY_RX`) —
+   rejects reference marks (a circled digit/letter with an arrow to a
+   word) before they even reach crop-verification. Each surviving
+   candidate box is then **crop-verified** by a second small call
+   (drawing / text / symbol); only explicit "drawing" survives
+   (fail-closed — a wrong handwriting crop is worse than a missed
+   diagram). Detector boxes are authoritative: they re-box matched
+   layout tags, delete unconfirmed ones, and insert missed drawings
+   anchored beside their annotations. Duplicate/nested boxes are
+   union-merged (`_same_region`: IoU or intersection-over-smaller-box).
+7. **Lab-table enforcement** — a deterministic code-level fallback:
+   when the extracted text clearly contains a pipe-table block (≥3 rows)
+   but the model's own layout has no real `<table>` for it, one is built
+   in code and spliced in (anchored on the block's first/last line).
+   Never touches a layout that already has a table.
+8. **Wrong-word audit** (`AUDIT_WORDS=1`) — a critic call sees the
    finished transcript as ANOTHER transcriber's work beside the page
    image and flags misread words (validated against the stated line,
    marks only — never silently replaces); flagged words gain `(?)` and
    come out red. Handwritten pages only.
-8. **Deterministic repairs** (code, not model — identical every run):
+9. **Deterministic repairs** (code, not model — identical every run):
    - `C/o` shorthand: line-start `yo`/`y/o`/`4o` → `C/o`;
    - checklist container: "(Circle If Positive)" section wrapped in a
      bordered `.checklist` div if the model forgot;
+   - lab-table enforcement (above);
    - prompt-echo guard + repetition collapse.
-9. **Language** — regional-script text (Kannada/Hindi/Tamil/…) is
-   translated to English by prompt rules (names transliterated, never
-   translated); any residual non-Latin fragments (incl. CJK noise) get
-   one text-only translate/clean call.
-10. **Uncertainty wrapping** — every `(?)` word is force-wrapped in
+10. **Language** — regional-script text (Kannada/Hindi/Tamil/…) is
+    translated to English by prompt rules (names transliterated, never
+    translated); any residual non-Latin fragments (incl. CJK noise) get
+    one text-only translate/clean call.
+11. **Uncertainty wrapping** — every `(?)` word is force-wrapped in
     `<span class="unc">` server-side (the red flagged-word styling never
     depends on the model remembering the class). Ink colors from the
     page are stripped — red in the output always means "verify this".
-11. **Crop embedding** — `data-bbox` tags become real JPEG crops
+12. **Crop embedding** — `data-bbox` tags become real JPEG crops
     (data: URIs) with position-mirroring float styles; logo-alt tags are
     deleted; pixel-coordinate boxes auto-convert to percentages.
+
+**Cross-page safety:** the three focused single-purpose calls (verify,
+header check, audit) explicitly warn the model that a page may belong
+to a different facility than earlier pages in the same document bundle
+— prevents a letterhead seen on page 1 from being hallucinated onto a
+later page (e.g. an external lab report) that only shows a partial,
+obscured fragment of its own header.
 
 **Document-level:** one structured-fields JSON call per ≤5-page chunk
 (chunks merged, fields deduped); then correction layers in `backend.py`:
