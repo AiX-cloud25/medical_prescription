@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-13-r9"
+EXTRACTOR_BUILD = "2026-08-13-r10"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -1015,10 +1015,14 @@ _LOGO_ALT_RX = re.compile(
 # reference mark — a circled digit/letter with an arrow to a word — has
 # none of it, so requiring a hit here rejects that whole failure class
 # deterministically, on top of the prompt wording and the crop verifier.
+# Also covers printed diagnostic-instrument graphs (scattergrams, ECG
+# traces) — a different crop-worthy category with its own vocabulary.
 _ANATOMY_RX = re.compile(
     r"breast|chest|abdomen|limb|organ|lesion|tumou?r|mass|outline|"
     r"sketch|anatomy|body|nodule|cyst|face|facial|cheek|neck|skin|"
-    r"swelling|growth|nodal|node|site|region|scar", re.IGNORECASE)
+    r"swelling|growth|nodal|node|site|region|scar|"
+    r"scattergram|graph|plot|histogram|waveform|trace|analyzer|"
+    r"scatter\s*plot", re.IGNORECASE)
 
 
 def _normalize_bbox(x, y, w, h, pw, ph):
@@ -1250,7 +1254,10 @@ _LOCAL_RULES = (
     "exact printed label exists on the page, and only place under it "
     "content that is physically written at that label's own position. A "
     "printed field with nothing written under it stays (blank) — do not "
-    "fill it with content that belongs to a different field.\n\n"
+    "fill it with content that belongs to a different field.\n"
+    "Transcribe each section ONCE. Never repeat a heading or its "
+    "checklist/items a second time later in your output, even if the "
+    "wording differs slightly the second time.\n\n"
 
     "9. HANDWRITTEN CONTENT\n"
     "Extract handwritten text with the same importance as printed text.\n"
@@ -1261,7 +1268,13 @@ _LOCAL_RULES = (
     "Handwritten pages often contain a SECOND group of writing after a gap on "
     "the SAME row (side-by-side groups or columns). Scan every row across its "
     "full width — left edge to right edge — and transcribe every group on the "
-    "row, left to right. Never drop the group on the right.\n\n"
+    "row, left to right. Never drop the group on the right.\n"
+    "A lab-instrument printout often has a numeric results table followed, "
+    "BELOW it, by several short label-only columns side by side (e.g. "
+    "'WBC IP Message', 'RBC IP Message', 'PLT IP Message' each with a "
+    "list of flag names under it). Extract EVERY one of these columns, "
+    "not just the ones that catch the eye first — the LEFTMOST column is "
+    "the one most often missed.\n\n"
 
     "11. PAGE-TYPE FORMAT\n"
     "Format tabular report pages (printed grids of lab/investigation results) "
@@ -2321,8 +2334,16 @@ def _alpha_tokens(s: str) -> set:
 def _recover_header(b64_image: str, page_num: int, text: str,
                     layout_html: str) -> tuple:
     """
-    Transcribe the top strip of the page and prepend any lines missing
-    from the transcript (and layout). Never raises.
+    Transcribe the top strip of the page and insert any lines missing
+    from the transcript (and layout). Insertion tracks the position of
+    the LAST existing line the crop's own reply matched, rather than
+    always prepending at the very top — a page whose main read already
+    got the letterhead right (position 0) but under-transcribed the
+    patient-details row just below it must have that row inserted AFTER
+    the letterhead, not in front of it. When nothing in the crop matches
+    anything existing (a genuinely header-less page), this naturally
+    falls back to inserting everything at position 0, same as before.
+    Never raises.
     """
     try:
         img = Image.open(io.BytesIO(base64.b64decode(b64_image)))
@@ -2338,40 +2359,77 @@ def _recover_header(b64_image: str, page_num: int, text: str,
             [hb64], 1200)
         if not raw or _cjk_garbage(raw):
             return text, layout_html
-        existing_lines = (text or "").splitlines()[:20]
+        lines = (text or "").splitlines()
+        search_n = min(len(lines), 20)
         existing = [set(re.findall(r"[a-z0-9]+", ln.lower()))
-                    for ln in existing_lines]
-        existing_alpha = [_alpha_tokens(ln) for ln in existing_lines]
-        add = []
+                    for ln in lines[:search_n]]
+        existing_alpha = [_alpha_tokens(ln) for ln in lines[:search_n]]
+
+        insert_at = 0
+        groups = []          # [(position_in_original_lines, [new_line, ...])]
+        current_pos = 0
+        current_group = []
+        added = 0
         for ln in raw.splitlines():
             ln = ln.strip()
             toks = set(re.findall(r"[a-z0-9]+", ln.lower()))
             if len(ln) < 3 or not toks:
                 continue
-            if any(t and len(toks & t) >= 0.6 * len(toks)
-                   for t in existing):
-                continue
-            # Digit-agnostic pass: catches the same field re-read with
-            # different (misread) digits, e.g. "BP 130/80" vs "BP!-
-            # 120/80" — same labels/units, different numbers — so it
-            # isn't inserted as a spurious near-duplicate line.
             cand_alpha = _alpha_tokens(ln)
-            if cand_alpha and any(
-                    a and len(cand_alpha & a) >= 0.5 * len(cand_alpha)
-                    for a in existing_alpha):
+            match_idx = None
+            # Containment ratio is relative to the CANDIDATE's own token
+            # count, not the existing line's — an existing line can
+            # legitimately be a longer combined line (e.g. one vitals
+            # line covering BP + SpO2 + PR) that several independent,
+            # narrower candidates each partially re-read; each candidate
+            # must still be recognized as covered by it.
+            for i in range(search_n):
+                if toks and existing[i] and len(toks & existing[i]) >= 0.6 * len(toks):
+                    match_idx = i
+                    break
+                # Digit-agnostic pass: catches the same field re-read with
+                # different (misread) digits, e.g. "BP 130/80" vs "BP!-
+                # 120/80" — same labels/units, different numbers — so it
+                # isn't inserted as a spurious near-duplicate line.
+                if (cand_alpha and existing_alpha[i]
+                        and len(cand_alpha & existing_alpha[i])
+                        >= 0.5 * len(cand_alpha)):
+                    match_idx = i
+                    break
+            if match_idx is not None:
+                if current_group:
+                    groups.append((current_pos, current_group))
+                    current_group = []
+                insert_at = match_idx + 1
+                current_pos = insert_at
                 continue
-            add.append(ln)
-            if len(add) >= 12:
+            current_group.append(ln)
+            added += 1
+            if added >= 12:
                 break
-        if not add:
+        if current_group:
+            groups.append((current_pos, current_group))
+        if not groups:
             print(f"[INFO] Page {page_num}: header check — nothing missing")
             return text, layout_html
-        text = "\n".join(add) + "\n" + (text or "")
+
         esc = (lambda s: s.replace("&", "&amp;")
                .replace("<", "&lt;").replace(">", "&gt;"))
-        block = "<div>" + "<br>".join(esc(l) for l in add) + "</div>"
-        layout_html = block + (layout_html or "")
-        print(f"[INFO] Page {page_num}: recovered {len(add)} header "
+        total_added = sum(len(g[1]) for g in groups)
+        # Insert bottom-up (by position, descending) so earlier positions
+        # stay valid as later ones are applied.
+        for pos, grp_lines in sorted(groups, key=lambda g: g[0], reverse=True):
+            lines[pos:pos] = grp_lines
+            if layout_html:
+                block = "<div>" + "<br>".join(esc(l) for l in grp_lines) + "</div>"
+                if pos == 0:
+                    layout_html = block + layout_html
+                else:
+                    anchor_line = lines[pos - 1] if pos - 1 < len(lines) else ""
+                    layout_html = _insert_html_after_anchor(
+                        layout_html, anchor_line, block)
+        text = "\n".join(lines)
+        print(f"[INFO] Page {page_num}: recovered {total_added} header "
               f"line(s) from top-strip read")
         return text, layout_html
     except Exception as e:
@@ -2403,11 +2461,13 @@ def _insert_html_after_anchor(layout_html: str, anchor_line: str,
     return layout_html + new_block
 
 
-def _find_anchor_span(layout_html: str, line: str):
+def _find_anchor_span(layout_html: str, line: str, start: int = 0):
     """
-    Locate `line`'s tokens inside layout_html, trying progressively
-    shorter trailing-token suffixes (same strategy as
-    _insert_html_after_anchor). Returns (start, end) of the match or
+    Locate `line`'s tokens inside layout_html (searching from `start`
+    onward — pass a prior match's end when locating a SECOND anchor, so
+    a repeated line elsewhere in the document isn't matched instead),
+    trying progressively shorter trailing-token suffixes (same strategy
+    as _insert_html_after_anchor). Returns (start, end) of the match or
     None.
     """
     tokens = re.findall(r"[A-Za-z0-9]+", line or "")[-6:]
@@ -2415,7 +2475,7 @@ def _find_anchor_span(layout_html: str, line: str):
         anchor_rx = re.compile(
             _ANCHOR_GAP.join(re.escape(w) for w in tokens[k:]),
             re.IGNORECASE)
-        m = anchor_rx.search(layout_html)
+        m = anchor_rx.search(layout_html, start)
         if m:
             return m.start(), m.end()
     return None
@@ -2630,15 +2690,22 @@ def _verify_completeness(b64_image: str, page_num: int, text: str,
 # tags, deletes unconfirmed ones, and inserts tags for missed drawings
 # anchored beside their own handwritten annotations.
 _DIAGRAM_SYSTEM = (
-    "You locate hand-drawn clinical DRAWINGS on ONE medical document page. "
-    "A drawing is a pen-drawn FIGURE built from NON-LETTER SHAPES: an "
-    "anatomy outline (breast, chest, abdomen, limb, organ), a "
-    "lesion/tumour map, circles or ovals drawn to represent organs or "
-    "masses (e.g. a pair of breast circles with dots, hatching or "
-    "arrows), a marked-up body outline, a freehand clinical "
-    "illustration — including small or faint ones. Handwritten labels "
-    "inside or beside such a figure are part of it. A circle drawn "
-    "AROUND an existing word or number is NOT a drawing.\n"
+    "You locate two kinds of clinically meaningful GRAPHICS on ONE "
+    "medical document page:\n"
+    "(1) Hand-drawn clinical DRAWINGS — a pen-drawn FIGURE built from "
+    "NON-LETTER SHAPES: an anatomy outline (breast, chest, abdomen, "
+    "limb, organ), a lesion/tumour map, circles or ovals drawn to "
+    "represent organs or masses (e.g. a pair of breast circles with "
+    "dots, hatching or arrows), a marked-up body outline, a freehand "
+    "clinical illustration — including small or faint ones. Handwritten "
+    "labels inside or beside such a figure are part of it. A circle "
+    "drawn AROUND an existing word or number is NOT a drawing.\n"
+    "(2) Printed DIAGNOSTIC GRAPHS from a lab or imaging instrument "
+    "printout — e.g. a CBC analyzer scattergram (WDF, WDF-CBC, RBC, PLT "
+    "plots), an ECG waveform trace, or a similar printed chart showing "
+    "raw diagnostic data/curves. These carry real clinical information "
+    "and MUST be captured, unlike decorative or purely informational "
+    "printed graphics.\n"
     "NEVER report:\n"
     "- handwritten words, sentences, numbers or lab values — even messy, "
     "slanted, crossed-out or hard-to-read handwriting is TEXT, not a "
@@ -2653,18 +2720,20 @@ _DIAGRAM_SYSTEM = (
     "would\n"
     "- hospital/clinic logos, letterhead emblems, medical symbols "
     "(caduceus, cross), barcodes, QR codes, stamps, signatures, "
-    "watermarks, printed graphics or charts, photographs.\n"
+    "watermarks, photographs, and PURELY DECORATIVE printed graphics "
+    "(icons, borders) that carry no diagnostic data.\n"
     "If a region contains only letters, digits and punctuation, it is NOT "
-    "a drawing.\n"
+    "a drawing or graph.\n"
     'Output ONLY JSON: {"diagrams": [{"bbox": [x, y, w, h], '
-    '"description": "<what the drawing shows>", '
-    '"labels": "<handwritten words inside or next to the drawing>"}]}. '
+    '"description": "<what the drawing/graph shows>", '
+    '"labels": "<handwritten words, or the graph/axis name, near it>"}]}. '
     "bbox: x,y = top-left corner, w,h = size, all PERCENTAGES (0-100) of "
-    "the page. Cover the WHOLE drawing including its annotations. "
-    'No drawings -> {"diagrams": []}.'
+    "the page. Cover the WHOLE drawing/graph including its labels. "
+    'Nothing found -> {"diagrams": []}.'
 )
 
-_DIAGRAM_USER = ("Find every hand-drawn clinical drawing on this page "
+_DIAGRAM_USER = ("Find every hand-drawn clinical drawing AND every "
+                 "printed diagnostic graph/scattergram on this page, "
                  "and return the JSON now.")
 
 # Second opinion on each candidate box: crop it and ask what it contains.
@@ -2673,12 +2742,14 @@ _DIAGRAM_USER = ("Find every hand-drawn clinical drawing on this page "
 _DIAGRAM_VERIFY_SYSTEM = (
     "You classify ONE cropped region of a medical document page. "
     "Answer with exactly one category:\n"
-    "drawing — the crop contains a hand-drawn clinical figure: an anatomy "
-    "outline (breast, chest, abdomen, limb, organ), a lesion or tumour "
-    "map, circles/ovals drawn to represent organs or masses, a marked-up "
-    "body outline, or any pen figure made of non-letter shapes, however "
-    "rough. Handwritten labels around or inside the figure do not change "
-    "the answer.\n"
+    "drawing — the crop contains EITHER a hand-drawn clinical figure "
+    "(an anatomy outline — breast, chest, abdomen, limb, organ — a "
+    "lesion or tumour map, circles/ovals drawn to represent organs or "
+    "masses, a marked-up body outline, or any pen figure made of "
+    "non-letter shapes, however rough) OR a printed diagnostic graph "
+    "from a lab/imaging instrument (a scattergram, plot, histogram, or "
+    "waveform/ECG trace showing real diagnostic data). Handwritten "
+    "labels or axis text around or inside it do not change the answer.\n"
     "text — the crop contains only handwriting or printed text: words, "
     "sentences, numbers, lab values — even messy, slanted or "
     "crossed-out.\n"
@@ -3177,6 +3248,61 @@ def _split_top_level(fragment: str) -> list:
     return chunks
 
 
+# Matches both the real form's own wording ("Circle Positive") and the
+# more common generic phrasing ("Circle If Positive") — the two forms
+# seen across different documents/sections, and also what a hallucinated
+# echo of this project's own prompt vocabulary would produce.
+_CHECKLIST_HEADING_RX = re.compile(r"circle\s*(?:if\s*)?positive", re.IGNORECASE)
+
+
+def _dedupe_checklist(page_num: int, text: str, layout_html: str) -> tuple:
+    """
+    If the printed symptom checklist ("Circle Positive" / "Circle If
+    Positive" section: GENERAL, LYMPH NODES, ... FAMILY HISTORY) appears
+    more than once in the extracted text — a model/verify-pass
+    duplication seen in practice — keep only the FIRST occurrence and
+    remove the rest, from both text and layout. Never raises.
+    """
+    if not text:
+        return text, layout_html
+    try:
+        lines = text.splitlines()
+        starts = [i for i, ln in enumerate(lines)
+                 if _CHECKLIST_HEADING_RX.search(ln)]
+        if len(starts) < 2:
+            return text, layout_html
+        ranges = []
+        for k, s in enumerate(starts):
+            limit = starts[k + 1] if k + 1 < len(starts) else len(lines)
+            end = next((i for i in range(s + 1, limit)
+                       if any(a in lines[i].lower()
+                              for a in _CHECKLIST_END_ANCHORS)),
+                      limit)
+            ranges.append((s, end))
+        dupes = ranges[1:]
+        removed = [lines[s:e] for s, e in dupes]
+        for s, e in sorted(dupes, key=lambda r: r[0], reverse=True):
+            del lines[s:e]
+        text = "\n".join(lines)
+        if layout_html:
+            for grp in removed:
+                if not grp:
+                    continue
+                span_start = _find_anchor_span(layout_html, grp[0])
+                span_end = (_find_anchor_span(layout_html, grp[-1],
+                                              start=span_start[1])
+                           if span_start else None)
+                if span_start and span_end and span_end[1] >= span_start[0]:
+                    layout_html = (layout_html[:span_start[0]]
+                                   + layout_html[span_end[1]:])
+        print(f"[INFO] Page {page_num}: removed {len(dupes)} duplicate "
+              f"checklist occurrence(s)")
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: checklist dedupe skipped ({e})")
+        return text, layout_html
+
+
 def _ensure_checklist_container(text: str, layout_html: str) -> str:
     """
     Guarantee the printed checklist is wrapped in <div class="checklist">
@@ -3185,7 +3311,7 @@ def _ensure_checklist_container(text: str, layout_html: str) -> str:
     """
     if not layout_html or not text:
         return layout_html
-    if "circle if positive" not in text.lower():
+    if not _CHECKLIST_HEADING_RX.search(text):
         return layout_html
     if re.search(r'class\s*=\s*["\'][^"\']*\bchecklist\b', layout_html):
         return layout_html
@@ -3196,7 +3322,7 @@ def _ensure_checklist_container(text: str, layout_html: str) -> str:
             return re.sub(r"<[^>]*>", " ", c).lower()
 
         start_i = next((i for i, c in enumerate(chunks)
-                        if "circle if positive" in chunk_text(c)), None)
+                        if _CHECKLIST_HEADING_RX.search(chunk_text(c))), None)
         if start_i is None:
             return layout_html
         # Both columns inside one big chunk → the model already built its
@@ -3313,6 +3439,9 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
             b64_image, page_num, text, layout_html)
     text = _fix_shorthand(text)
     layout_html = _fix_shorthand_html(layout_html)
+    # Remove any duplicate "Circle (If) Positive" checklist occurrence
+    # BEFORE bordering — the border must apply to a single, deduped copy.
+    text, layout_html = _dedupe_checklist(page_num, text, layout_html)
     layout_html = _ensure_checklist_container(text, layout_html)
     text, layout_html = _translate_residual_scripts(
         page_num, text, layout_html)

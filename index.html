@@ -591,6 +591,20 @@
       });
     }
 
+    // Sampled pixel check — true when a rendered slice is essentially
+    // all white. Used to drop trailing blank PDF pages that a fixed
+    // percentage-of-slice-height threshold could miss (e.g. a large
+    // blank margin below a floated image is not a "tiny sliver" by
+    // height, but is still visually empty).
+    function isCanvasSliceBlank(ctx, w, h) {
+      const data = ctx.getImageData(0, 0, w, h).data;
+      const stride = 4 * 37; // sample ~1 in 37 pixels — fast, plenty dense
+      for (let i = 0; i < data.length; i += stride) {
+        if (data[i] < 250 || data[i + 1] < 250 || data[i + 2] < 250) return false;
+      }
+      return true;
+    }
+
     async function downloadPdf(doc, onProgress) {
       if (!window.jspdf || !window.html2canvas) {
         throw new Error("PDF libraries failed to load from the CDN — check the network connection and reload the page.");
@@ -620,12 +634,6 @@
           const sliceHpx = Math.floor((usableH / usableW) * canvas.width);
           for (let y = 0; y < canvas.height; y += sliceHpx) {
             const hPx = Math.min(sliceHpx, canvas.height - y);
-            // A trailing sliver under 6% of a full slice is layout
-            // rounding/margin overflow, not real content — skip it
-            // rather than spawning a near-blank extra PDF page.
-            if (y > 0 && hPx < sliceHpx * 0.06) break;
-            if (!firstPdfPage) pdf.addPage();
-            firstPdfPage = false;
             const slice = document.createElement("canvas");
             slice.width = canvas.width;
             slice.height = hPx;
@@ -633,6 +641,14 @@
             ctx.fillStyle = "#ffffff";
             ctx.fillRect(0, 0, slice.width, slice.height);
             ctx.drawImage(canvas, 0, y, canvas.width, hPx, 0, 0, canvas.width, hPx);
+            // A slice with no real content (layout rounding/margin
+            // overflow after the last real line, e.g. below a floated
+            // image or the checklist's clearing div) would otherwise
+            // spawn its own blank PDF page — skip it, but keep scanning
+            // (never break: real content can resume after a blank gap).
+            if (y > 0 && isCanvasSliceBlank(ctx, slice.width, slice.height)) continue;
+            if (!firstPdfPage) pdf.addPage();
+            firstPdfPage = false;
             pdf.addImage(
               slice.toDataURL("image/jpeg", 0.85), "JPEG",
               MARGIN, MARGIN, usableW, (hPx * usableW) / canvas.width,
