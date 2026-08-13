@@ -372,6 +372,7 @@
         ".hw { font-family: inherit; color: inherit; }" +
         ".stamp { display: inline-block; border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; transform: rotate(-2deg); margin: 2px; }" +
         ".unc { color: #dc2626; font-weight: 700; }" +
+        ".qhide { display: none; }" +
         "img.cut { max-width: 100%; height: auto; border-radius: 4px; }" +
         "img.cut:not([src]) { border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; min-height: 18px; }" +
         "</style></head><body>" + fragment + "</body></html>"
@@ -657,6 +658,7 @@
         "td, th { border: 1px solid #cbd5e1; padding: 6px 10px; font-size: 12px; line-height: 1.5; }" +
         ".stamp { border: 1.5px dashed #9333ea; color: #9333ea; padding: 2px 8px; font-size: 11px; }" +
         ".unc { color: #dc2626; font-weight: bold; }" +
+        ".qhide { display: none; }" +
         ".checklist { border: 1.5px solid #64748b; padding: 8px 10px; margin: 6px 0; }" +
         "img { max-width: 100%; }" +
         "h3.pg { color: #475569; font-size: 12px; border-bottom: 1px solid #cbd5e1; padding-bottom: 2px; }";
@@ -830,7 +832,12 @@
 
       const copy = async () => {
         try {
-          await navigator.clipboard.writeText((result && result.raw_text) || "");
+          // (?) is an internal flagged-word marker (drives the red
+          // highlight + correction matching) — strip it here so nothing
+          // with a "?" ever reaches the clipboard; result.raw_text itself
+          // is untouched.
+          const clean = ((result && result.raw_text) || "").replace(/\(\?\)/g, "");
+          await navigator.clipboard.writeText(clean);
           setCopied(true);
           setTimeout(() => setCopied(false), 1600);
         } catch (e) { /* clipboard unavailable */ }

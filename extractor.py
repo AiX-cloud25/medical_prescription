@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-12-r8"
+EXTRACTOR_BUILD = "2026-08-13-r9"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -901,6 +901,16 @@ def _wrap_uncertain(html: str) -> str:
     <span class="unc"> so the UI can highlight it — even when the model
     forgot the class. Walks tag/text pieces, skips text already inside an
     unc span, and never touches tag attributes. Never raises.
+
+    The "(?)" marker itself stays in the HTML (nested in its own
+    <span class="qhide">) rather than being deleted — it's still the
+    internal signal this function relies on, and the raw-text
+    correction/diff pipeline indirectly depends on it being present —
+    but that inner span is CSS-hidden (buildLayoutDoc's .qhide rule), so
+    no "?" is ever visible on screen, in the PDF, or in the Word export.
+    (Not named "unc-*": the frontend's uncCount legend regex matches the
+    whole word "unc" via \bunc\b, which "-" boundaries don't block — a
+    name sharing that word would silently double the displayed count.)
     """
     if not html or "(?)" not in html:
         return html
@@ -919,8 +929,10 @@ def _wrap_uncertain(html: str) -> str:
                 elif low.startswith("</span") and depth:
                     depth -= 1
             elif depth == 0 and "(?)" in part:
-                part = re.sub(r"(\S+\(\?\))",
-                              r'<span class="unc">\1</span>', part)
+                part = re.sub(
+                    r"(\S+)(\(\?\))",
+                    r'<span class="unc">\1<span class="qhide">\2</span></span>',
+                    part)
             out.append(part)
         return "".join(out)
     except Exception as e:
@@ -1265,7 +1277,22 @@ _LOCAL_RULES = (
     "English/Roman characters — never any Kannada, Devanagari, Tamil or "
     "other script, never one Indian script converted into another, and "
     "never Chinese/Japanese/Korean characters (those are decoding "
-    "errors, not page content).\n"
+    "errors, not page content).\n\n"
+
+    "13. CIRCLED SELECTIONS ANYWHERE ON THE PAGE\n"
+    "Handwritten pen circles select ONE option in many places on these "
+    "forms, not only inside a \"(Circle If Positive)\" symptom list. "
+    "This includes:\n"
+    "- A field listing several printed options (e.g. Build : Normal, "
+    "Obese, Asthenic) where one option is circled — mark ONLY that "
+    "option: Build : Normal(Circled), Obese, Asthenic\n"
+    "- A scored/graded list (e.g. a Performance Status scale 0-4, each "
+    "on its own line) where one line's leading number is circled — "
+    "mark ONLY that number: 0(Circled) - Asymptomatic fully ambulatory\n"
+    "Wrap only the specific circled word or number in (Circled), never "
+    "the whole line or field. Only mark it when a drawn pen circle "
+    "clearly encloses that exact word/number — when in doubt, leave it "
+    "unmarked.\n"
 )
 
 # Commands appended to the USER message — processed last before generation.
@@ -1306,6 +1333,9 @@ _LOCAL_USER_RULES = (
     "included.\n"
     "- Printed labels with empty values are listed as Label : (blank), "
     "never skipped.\n"
+    "- Any circled word/option/number anywhere on the page — not just "
+    "inside a (Circle If Positive) list — is marked (Circled), only "
+    "that word, never the whole line.\n"
 )
 
 
