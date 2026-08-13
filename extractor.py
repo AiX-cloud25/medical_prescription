@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-13-r10"
+EXTRACTOR_BUILD = "2026-08-13-r11"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -1292,20 +1292,23 @@ _LOCAL_RULES = (
     "never Chinese/Japanese/Korean characters (those are decoding "
     "errors, not page content).\n\n"
 
-    "13. CIRCLED SELECTIONS ANYWHERE ON THE PAGE\n"
-    "Handwritten pen circles select ONE option in many places on these "
-    "forms, not only inside a \"(Circle If Positive)\" symptom list. "
+    "13. MARKED SELECTIONS ANYWHERE ON THE PAGE\n"
+    "A handwritten pen mark selects ONE option in many places on these "
+    "forms, not only inside a \"(Circle If Positive)\" symptom list. The "
+    "mark may be a circle, an asterisk/star, a tick or check mark, an "
+    "underline, or a cross — all of these mean the same thing: SELECTED. "
     "This includes:\n"
     "- A field listing several printed options (e.g. Build : Normal, "
-    "Obese, Asthenic) where one option is circled — mark ONLY that "
-    "option: Build : Normal(Circled), Obese, Asthenic\n"
+    "Obese, Asthenic) where one option has a mark next to or through it "
+    "— mark ONLY that option, using (Circled) regardless of the mark's "
+    "shape: Build : Normal, Obese, Asthenic(Circled)\n"
     "- A scored/graded list (e.g. a Performance Status scale 0-4, each "
-    "on its own line) where one line's leading number is circled — "
-    "mark ONLY that number: 0(Circled) - Asymptomatic fully ambulatory\n"
-    "Wrap only the specific circled word or number in (Circled), never "
-    "the whole line or field. Only mark it when a drawn pen circle "
-    "clearly encloses that exact word/number — when in doubt, leave it "
-    "unmarked.\n"
+    "on its own line) where one line's leading number is marked — mark "
+    "ONLY that number: 0(Circled) - Asymptomatic fully ambulatory\n"
+    "Wrap only the specific marked word or number in (Circled) — same "
+    "tag for every mark shape — never the whole line or field. Only mark "
+    "it when a drawn pen mark clearly applies to that exact word/number "
+    "— when in doubt, leave it unmarked.\n"
 )
 
 # Commands appended to the USER message — processed last before generation.
@@ -1346,9 +1349,10 @@ _LOCAL_USER_RULES = (
     "included.\n"
     "- Printed labels with empty values are listed as Label : (blank), "
     "never skipped.\n"
-    "- Any circled word/option/number anywhere on the page — not just "
-    "inside a (Circle If Positive) list — is marked (Circled), only "
-    "that word, never the whole line.\n"
+    "- Any marked word/option/number anywhere on the page — circled, "
+    "starred, ticked, underlined or crossed, not just inside a (Circle "
+    "If Positive) list — is marked (Circled), only that word, never the "
+    "whole line.\n"
 )
 
 
