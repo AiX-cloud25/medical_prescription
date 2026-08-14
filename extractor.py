@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-14-r12"
+EXTRACTOR_BUILD = "2026-08-14-r13"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -2281,6 +2281,29 @@ def _page_has_handwriting(text: str, layout_html: str) -> bool:
     return "(?)" in (text or "")
 
 
+_HW_SPAN_RX = re.compile(
+    r'<span[^>]*class\s*=\s*["\'][^"\']*\bhw\b[^"\']*["\'][^>]*>(.*?)</span>',
+    re.DOTALL | re.IGNORECASE)
+_INNER_TAG_RX = re.compile(r"<[^>]+>")
+
+
+def _handwriting_fraction(text: str, layout_html: str) -> float:
+    """
+    Share (0.0-1.0) of the page's transcribed content that is
+    handwriting, estimated as (characters inside <span class="hw">
+    tags) / (total transcript characters). A page that's almost
+    entirely printed with a trace of handwriting (e.g. one signed
+    name on a lab printout) scores low even though it "has"
+    handwriting in the binary sense of _page_has_handwriting.
+    """
+    if not text or not layout_html:
+        return 0.0
+    hw_chars = sum(len(_INNER_TAG_RX.sub("", m))
+                   for m in _HW_SPAN_RX.findall(layout_html))
+    total_chars = len(text)
+    return hw_chars / total_chars if total_chars else 0.0
+
+
 _SECTION_FIRST_RX = re.compile(
     r"^(?:COMPLETE\s+)?(?:HAEMOGRAM|HAEMATOLOGY|BIOCHEMISTRY|"
     r"DIFFERENTIAL\s+COUNT|.*\bREPORT)\s*$", re.IGNORECASE)
@@ -3059,6 +3082,14 @@ def _should_detect(text: str, layout_html: str) -> bool:
 # thus the red highlight), never silently replaced: the client corrects.
 _AUDIT = os.getenv("AUDIT_WORDS", "1").strip().lower() in (
     "1", "true", "yes", "on")
+# A page that's overwhelmingly printed with just a trace of handwriting
+# (e.g. one signed name on a lab printout) skips the full-page audit
+# critique entirely — that pass was reviewing every line, including the
+# printed majority, and false-flagging correct printed labels near the
+# handwritten bit. Below this share of handwritten content, audit is
+# skipped UNLESS the page has genuine self-marked uncertainty (?),
+# which always still triggers it regardless of the fraction.
+_AUDIT_MIN_HW_FRACTION = float(os.getenv("AUDIT_MIN_HW_FRACTION", "0.15"))
 
 _AUDIT_SYSTEM = (
     "You are checking ANOTHER transcriber's work. You receive one medical "
@@ -3486,8 +3517,15 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     # degenerate one).
     text, layout_html = _enforce_lab_tables(page_num, text, layout_html)
     # Wrong-word audit: critic pass flags misread words with (?) so they
-    # come out red for the client to correct. Handwritten pages only.
-    if _AUDIT and text and _page_has_handwriting(text, layout_html):
+    # come out red for the client to correct. Runs when the page has
+    # genuine self-marked uncertainty, OR when handwriting makes up a
+    # meaningful share of the page (not just a trace) — a page that's
+    # almost entirely printed skips the full-page critique so it can't
+    # false-flag correct printed labels near a small handwritten bit.
+    if _AUDIT and text and (
+            "(?)" in text
+            or _handwriting_fraction(text, layout_html)
+            >= _AUDIT_MIN_HW_FRACTION):
         text, layout_html = _audit_words(
             b64_image, page_num, text, layout_html)
     text = _fix_shorthand(text)
