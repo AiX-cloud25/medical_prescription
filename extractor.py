@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-13-r11"
+EXTRACTOR_BUILD = "2026-08-14-r12"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -3072,7 +3072,14 @@ _AUDIT_SYSTEM = (
     "unless you can see an actual spelling error in the printed text "
     "itself. Reserve flags for content that could plausibly be "
     "misread: handwriting, numbers, dosages, and shorthand. When in "
-    "doubt about a printed word, do not flag it. " + _NO_CROSS_PAGE_RULE + " "
+    "doubt about a printed word, do not flag it. "
+    "A printed field LABEL with no filled-in value (a blank field) is "
+    "NOT inherently suspicious — do not flag a blank field's label just "
+    "because the field is empty or that part of the page/photo is "
+    "creased, curled, faded, or otherwise lower quality. Judge each "
+    "word on its own: only flag a label if its OWN letters look "
+    "different from the transcription, never because a NEARBY region "
+    "of the image is harder to read. " + _NO_CROSS_PAGE_RULE + " "
     'Output ONLY JSON: {"wrong": [{"line": <line number>, '
     '"word": "<the exact word as transcribed>", '
     '"correct": "<your best reading from the image>"}]}. '
@@ -3086,13 +3093,53 @@ _AUDIT_USER = (
 )
 
 
+# A line that is ENTIRELY a printed field label with nothing filled in
+# after it (e.g. "Pos.:", "Doctor:", "Sex:") — a blank field. There is
+# nothing to verify against the image (no content was transcribed), so
+# flagging its label is never useful — suppress deterministically rather
+# than trust the model to keep following the equivalent prompt rule.
+_BLANK_LABEL_LINE_RX = re.compile(r"^[^:]{1,40}:\s*$")
+
+
+def _strip_blank_field_uncertainty(text: str, layout_html: str) -> tuple:
+    """
+    Remove any "(?)" marker sitting on a line that is nothing but a
+    blank field's label — regardless of whether the main read
+    self-marked it or the audit pass flagged it. Never raises.
+    """
+    if not text or "(?)" not in text:
+        return text, layout_html
+    try:
+        changed = []
+        out_lines = []
+        for ln in text.splitlines():
+            bare = re.sub(r"\(\?\)", "", ln).strip()
+            if "(?)" in ln and _BLANK_LABEL_LINE_RX.match(bare):
+                cleaned = ln.replace("(?)", "")
+                changed.append((ln.strip(), cleaned.strip()))
+                out_lines.append(cleaned)
+            else:
+                out_lines.append(ln)
+        if not changed:
+            return text, layout_html
+        text = "\n".join(out_lines)
+        if layout_html:
+            for orig, cleaned in changed:
+                layout_html = layout_html.replace(orig, cleaned)
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] blank-field uncertainty cleanup skipped ({e})")
+        return text, layout_html
+
+
 def _audit_words(b64_image: str, page_num: int, text: str,
                  layout_html: str) -> tuple:
     """
     One critic call that flags misread words. Each accepted flag appends
     "(?)" to the word in text AND layout, so the existing _wrap_uncertain
     pipeline turns it into a highlighted span. Marks only — never
-    replaces the transcribed word. Never raises.
+    replaces the transcribed word. Blank-field label lines are never
+    flagged, regardless of what the model says. Never raises.
     """
     try:
         lines = text.splitlines()
@@ -3131,6 +3178,8 @@ def _audit_words(b64_image: str, page_num: int, text: str,
                     break
             if hit is None:
                 continue  # auditor hallucinated a word — reject
+            if _BLANK_LABEL_LINE_RX.match(lines[hit].strip()):
+                continue  # blank field label — never flagged
             lines[hit] = word_rx.sub(word + "(?)", lines[hit], count=1)
             flagged.append((word, sugg))
 
@@ -3449,6 +3498,10 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     layout_html = _ensure_checklist_container(text, layout_html)
     text, layout_html = _translate_residual_scripts(
         page_num, text, layout_html)
+    # Universal backstop: a blank field's label is never highlighted,
+    # whichever pass marked it — self-uncertainty during the main read,
+    # or the audit critic. Runs last so it catches every source.
+    text, layout_html = _strip_blank_field_uncertainty(text, layout_html)
     if layout_html:
         layout_html = _wrap_uncertain(layout_html)
     return text, layout_html, layout_error, b64_image
