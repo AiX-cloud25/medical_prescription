@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-17-r16"
+EXTRACTOR_BUILD = "2026-08-17-r17"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -324,32 +324,63 @@ it as text on its line (use "Δ"); it is never a diagram or image.
 
 Doctors often summarize a CBC with a small hand-drawn cross/branch
 diagram — sometimes called a hemogram tree or "fishbone" — instead of
-writing labels for each value. The four values and their conventional
-positions:
-- Hemoglobin (Hb): near the LEFT of the branch point, often with a
-  "g" or "gm%" suffix (e.g. 10.2, 19g).
-- Total (WBC) Count (TC/TLC): near the TOP/UPPER-RIGHT of the branch
-  point, typically a 3-5 digit number, sometimes abbreviated in
-  thousands (e.g. 9.0 meaning ~9000, or written out as 9200).
-- Differential Count/Neutrophil %: near the BOTTOM/LOWER part of the
-  diagram, typically 0-100, often with a % sign or a trailing dot
-  (e.g. 6.6, 69.1.).
-- Platelet Count (Plt): near the BOTTOM-LEFT or pointed to by its own
-  arrow, typically suffixed "L" for lakh (e.g. 4L, 2.6L), or a larger
-  raw number if not abbreviated.
-Use BOTH signals together — position in the diagram AND each value's
-own format (magnitude + suffix) — to decide which value is which; they
-should agree. Labels are sometimes spelled out beside the value and
-connected by an arrow, sometimes the values stand alone with no
-written label at all — read the value's position and format the same
-way either time.
+writing labels for each value. The CONNECTOR shape varies a lot: a
+classic 4-way cross, a single value followed by ">" or an arrow that
+opens into a brace/bracket "{" joining two further values, a value
+with its own short arrow, or values simply stacked vertically with no
+line at all. Treat ALL of these as the same shorthand — the connector
+only tells you which values belong to the SAME cluster/visit, never
+which label a value gets.
+The four values and how to recognize each ONE regardless of diagram
+shape (use format/magnitude as the PRIMARY signal; position in a cross
+diagram, when present, is a secondary confirming signal only):
+- Hemoglobin (Hb): a small number, usually one decimal place, roughly
+  in the 2-20 range, often with a "g" or "gm%" suffix (e.g. 10.2, 19g,
+  6.6). In a cross diagram it sits near the LEFT of the branch point.
+- Total (WBC) Count (TC/TLC): a 3-5 digit whole number, typically in
+  the hundreds to tens-of-thousands range (e.g. 1100, 4200, 9200),
+  sometimes abbreviated in thousands (9.0 meaning ~9000). In a cross
+  diagram it sits near the TOP/UPPER-RIGHT of the branch point.
+- Platelet Count (Plt): usually the LARGEST number in the cluster —
+  a 4-6 digit whole number, often with a comma (e.g. 70,000), or
+  suffixed "L" for lakh (4L, 2.6L). In a cross diagram it sits near
+  the BOTTOM-LEFT or has its own arrow.
+- Differential Count/Neutrophil % or Blast %: a 0-100 number, often
+  with a % sign or a trailing dot (e.g. 6.6, 69.1., 20%). In a cross
+  diagram it sits near the BOTTOM. In oncology/haematology workup
+  notes (MDS, leukemia, blast-count monitoring, BMA/BMBx/FISH orders
+  nearby) this value is more often "Blast %" than a differential —
+  use the surrounding clinical context to pick the closer label, and
+  if genuinely unsure, label it "Blast/Differential %".
+Because format/magnitude is the primary signal, do not force a value
+into the wrong bucket just to match a position rule — e.g. a 4-digit
+whole number is Total Count even if it happens to sit lower on the
+page than the Platelet number, and a value with a decimal point is
+Hemoglobin even outside the classic left position.
 This is shorthand notation, not a printed results grid (see TABLES)
 and not a clinical drawing — even though Hb/TC/DC/Plt are lab-style
 values, never format this as a pipe table, and never report it as a
-diagram. Transcribe it as four separate labeled lines. Keep every
-digit and punctuation mark exactly as written — add the label, never
-invent or complete a value (e.g. do not turn "69.1." into "69%").
-Two worked examples:
+diagram. Transcribe it as separate labeled lines, never as a flat run
+of numbers with no labels. Keep every digit and punctuation mark
+exactly as written — add the label, never invent or complete a value
+(e.g. do not turn "69.1." into "69%").
+
+SERIAL / FOLLOW-UP CBC CLUSTERS: follow-up and oncology notes often
+repeat this shorthand once per visit, each cluster written beside or
+just below that visit's date (a running trend down the page, not a
+single one-off diagram). When a fishbone cluster is paired with a
+date:
+- Output the date on its own line first: Date : <date>
+- Then output that cluster's labeled values beneath it, one per line.
+- Never merge a date's digits into a value, or a value's digits into
+  the date — they are separate numbers even when written close
+  together or on the same row (e.g. a date "1/2/2026" beside a Total
+  Count of "1100" must never be combined into one number).
+- Keep each visit's cluster together and in the same top-to-bottom
+  order the visits appear on the page; do not interleave values from
+  two different dates.
+
+Three worked examples:
   Handwritten: "hemoglobin" with an arrow to 10.2; "total count" with
   an arrow to 9.0; "neutrophil" with an arrow to 6.6; "Platelets" with
   an arrow to 4L.
@@ -367,9 +398,22 @@ Two worked examples:
     Total count = 9200
     Neutrophil = 69.1.
     Platelets = 2.6L
-Label only the values you can confidently place using both signals; if
-a value's role is genuinely unclear, transcribe it verbatim rather
-than guessing a label.
+
+  Handwritten (serial cluster, no labels): a date "1/2/2026" written
+  above; below it "6.6" then ">" opening into a brace that joins
+  "1100" and "70,000" as sibling branches; "20%" written below the
+  brace. (MDS workup context nearby.)
+  Output:
+    Date : 1/2/2026
+    Hemoglobin = 6.6
+    Total count = 1100
+    Platelets = 70,000
+    Blast/Differential % = 20%
+
+Label only the values you can confidently place using format/magnitude
+(and position, when a cross diagram is present); if a value's role is
+genuinely unclear, transcribe it verbatim rather than guessing a
+label.
 
 --------------------------------------
 TNM / STAGE GRIDS
@@ -1393,9 +1437,11 @@ _LOCAL_USER_RULES = (
     "transliterated, not translated).\n"
     "- Complaint lines start with C/o (Complains of) — never transcribed as "
     "\"y/o\" or \"40\".\n"
-    "- A hand-drawn Hb/TC/DC/Plt CBC cross/branch (fishbone) -> four "
-    "labeled lines (Hemoglobin / Total count / Neutrophil / Platelets), "
-    "never a table, never a diagram.\n"
+    "- A hand-drawn CBC fishbone/cross-branch cluster (any connector "
+    "shape: cross, '>'/arrow into a brace, or simple stacking) -> "
+    "labeled lines (Hemoglobin / Total count / Neutrophil or Blast % / "
+    "Platelets), paired with its visit Date if one is written beside "
+    "it, never a table, never a diagram.\n"
     "- Your FIRST output line is the topmost visible text on the page — "
     "IDs, UHID numbers, tokens, room numbers, URLs at the top edge "
     "included.\n"
@@ -3141,111 +3187,150 @@ def _should_detect(text: str, layout_html: str) -> bool:
 # page image (same architecture as _detect_diagrams/_recover_header/
 # _verify_completeness/_audit_words) for this one pattern only.
 _FISHBONE_SYSTEM = (
-    "You look at ONE medical document page image for a hand-drawn CBC "
-    "'fishbone'/cross diagram — NOT a printed table — a small pen "
-    "diagram connecting numeric values for Hemoglobin, Total (WBC) "
-    "Count, Differential Count/Neutrophil, and Platelet count with "
-    "short branch lines. Labels are sometimes written out beside a "
-    "value with an arrow, sometimes the values stand alone with no "
-    "label at all. Conventional layout: Hemoglobin near the left "
-    "(often 'g'/'gm%' suffix), Total Count near the top/upper-right "
-    "(3-5 digits), Differential/Neutrophil near the bottom (0-100, "
-    "often '%' or a trailing dot), Platelet count on the lower side "
-    "(often 'L' for lakh suffix, or a larger raw number). "
+    "You look at ONE medical document page image for hand-drawn CBC "
+    "shorthand — NOT a printed table — small pen diagrams connecting "
+    "numeric values for Hemoglobin, Total (WBC) Count, "
+    "Differential/Neutrophil or Blast %, and Platelet count, instead "
+    "of writing a label for each value. The connector shape varies: a "
+    "4-way cross, a value followed by '>' or an arrow opening into a "
+    "brace/bracket joining two further values, a value with its own "
+    "short arrow, or values simply stacked with no line at all — "
+    "treat all of these as the same shorthand. Labels are sometimes "
+    "written out beside a value with an arrow, sometimes the values "
+    "stand alone with no label at all.\n"
+    "Follow-up / oncology notes often repeat this shorthand ONCE PER "
+    "VISIT down the page, each cluster written beside or under that "
+    "visit's date. Find EVERY such cluster on the page, in "
+    "top-to-bottom reading order — not just the first one — and "
+    "capture the nearby date for each cluster if one is present.\n"
+    "Identify each value primarily by FORMAT/MAGNITUDE (position in a "
+    "cross diagram, when present, is only a secondary confirming "
+    "signal): Hemoglobin is a small number, usually one decimal place, "
+    "roughly 2-20, often 'g'/'gm%' suffix. Total (WBC) Count is a 3-5 "
+    "digit whole number, hundreds to tens-of-thousands (e.g. 1100, "
+    "9200). Platelet count is usually the LARGEST number in the "
+    "cluster, 4-6 digits, often comma-separated (e.g. 70,000), or "
+    "'L'-suffixed for lakh. The remaining value is 0-100, often with "
+    "'%' or a trailing dot — label it 'Blast %' on oncology/"
+    "haematology workup pages (MDS, leukemia, blast monitoring, "
+    "BMA/BMBx/FISH mentioned nearby), otherwise 'Neutrophil'.\n"
     "Read each value DIRECTLY FROM THE IMAGE. Keep every digit and "
     "punctuation mark exactly as written — never invent, complete, or "
     "normalize a value (do not turn '69.1.' into '69%' or '70,000' "
     "into '70000'). If you cannot confidently place a value's role, "
-    "leave that field null rather than guessing. If this page has no "
-    "such diagram, say so.\n"
-    'Output ONLY JSON: {"found": true|false, "hemoglobin": "<value or '
-    'null>", "total_count": "<value or null>", "neutrophil": "<value '
-    'or null>", "platelets": "<value or null>"}.'
+    "leave that field null rather than guessing. If the page has no "
+    "such diagram anywhere, return an empty list.\n"
+    'Output ONLY JSON: {"clusters": [{"date": "<value or null>", '
+    '"hemoglobin": "<value or null>", "total_count": "<value or '
+    'null>", "bottom_label": "Neutrophil"|"Blast %", "bottom_value": '
+    '"<value or null>", "platelets": "<value or null>"}]}.'
 )
-_FISHBONE_USER = ("Find the CBC fishbone/cross diagram on this page, if "
-                  "any, and return the JSON now.")
+_FISHBONE_USER = ("Find every CBC fishbone/cross-style diagram on this "
+                  "page, if any, in top-to-bottom order, and return the "
+                  "JSON now.")
 
 
 def _detect_cbc_fishbone(b64_image: str, page_num: int):
     """
-    One focused vision call reading the CBC fishbone directly from the
-    image, where its 2D layout is still intact. Returns the parsed
-    dict on a genuine find, or None (nothing found / failure). Never
-    raises.
+    One focused vision call reading CBC fishbone shorthand directly
+    from the image, where its 2D layout is still intact. Returns a
+    list of cluster dicts on a genuine find, or None (nothing found /
+    failure). Never raises.
     """
     try:
         raw, _ = _ollama_chat(_FISHBONE_SYSTEM, _FISHBONE_USER,
                               [b64_image], 300, json_mode=True)
         parsed = _parse_json_loose(raw) if raw else {}
-        if not isinstance(parsed, dict) or not parsed.get("found"):
+        if not isinstance(parsed, dict):
             return None
-        fields = ("hemoglobin", "total_count", "neutrophil", "platelets")
-        if not any(str(parsed.get(f) or "").strip() for f in fields):
+        clusters = parsed.get("clusters")
+        if not isinstance(clusters, list) or not clusters:
             return None
-        return parsed
+        value_fields = ("hemoglobin", "total_count", "bottom_value",
+                        "platelets")
+        cleaned = [c for c in clusters if isinstance(c, dict)
+                  and any(str(c.get(f) or "").strip() for f in value_fields)]
+        return cleaned or None
     except Exception as e:
         print(f"[WARNING] Page {page_num}: fishbone detection skipped "
               f"({e})")
         return None
 
 
-_FISHBONE_LABELS = (
-    ("hemoglobin", "Hemoglobin"),
-    ("total_count", "Total count"),
-    ("neutrophil", "Neutrophil"),
-    ("platelets", "Platelets"),
-)
-
-
 def _merge_cbc_fishbone(page_num: int, text: str, layout_html: str,
-                        result) -> tuple:
+                        clusters) -> tuple:
     """
-    Inserts "Label = value" lines for a detected CBC fishbone right
-    after the raw scattered numbers it was drawn from — never deletes
-    or alters the original transcription, only adds the interpreted
-    values beside it. Never raises.
+    Inserts "Label = value" lines for each detected CBC fishbone
+    cluster right after the raw scattered numbers it was drawn from —
+    never deletes or alters the original transcription, only adds the
+    interpreted values beside it. Clusters are merged in order, each
+    searching forward from the previous cluster's insertion point so
+    same-value clusters (e.g. repeated dates) anchor in the correct
+    place rather than all collapsing onto the first match. Never
+    raises.
     """
-    if not result:
+    if not clusters:
         return text, layout_html
     try:
-        values = []
-        for key, label in _FISHBONE_LABELS:
-            v = str(result.get(key) or "").strip()
-            if v:
-                values.append((label, v))
-        if not values:
-            return text, layout_html
-
         lines = text.splitlines()
-        anchor_idx = None
-        for _, v in values:
-            for i, ln in enumerate(lines):
-                if v in ln:
-                    anchor_idx = i
+        search_from = 0
+        merged = 0
+        for cluster in clusters:
+            date_v = str(cluster.get("date") or "").strip()
+            hb = str(cluster.get("hemoglobin") or "").strip()
+            tc = str(cluster.get("total_count") or "").strip()
+            bl_label = str(cluster.get("bottom_label") or "").strip() \
+                or "Neutrophil"
+            bl_val = str(cluster.get("bottom_value") or "").strip()
+            plt = str(cluster.get("platelets") or "").strip()
+
+            values = []
+            if hb:
+                values.append(("Hemoglobin", hb))
+            if tc:
+                values.append(("Total count", tc))
+            if bl_val:
+                values.append((bl_label, bl_val))
+            if plt:
+                values.append(("Platelets", plt))
+            if not values:
+                continue
+
+            anchor_idx = None
+            for _, v in values:
+                for i in range(search_from, len(lines)):
+                    if v in lines[i]:
+                        anchor_idx = i
+                        break
+                if anchor_idx is not None:
                     break
-            if anchor_idx is not None:
-                break
 
-        new_lines = [f"{label} = {v}" for label, v in values]
-        anchor_line = lines[anchor_idx] if anchor_idx is not None else (
-            lines[-1] if lines else "")
-        insert_at = (anchor_idx + 1) if anchor_idx is not None else len(lines)
-        lines[insert_at:insert_at] = new_lines
+            new_lines = ([f"Date : {date_v}"] if date_v else []) + \
+                [f"{label} = {v}" for label, v in values]
+            anchor_line = lines[anchor_idx] if anchor_idx is not None else (
+                lines[-1] if lines else "")
+            insert_at = (anchor_idx + 1) if anchor_idx is not None \
+                else len(lines)
+            lines[insert_at:insert_at] = new_lines
+            search_from = insert_at + len(new_lines)
+            merged += 1
+
+            if layout_html:
+                # Chain the anchor forward onto each just-inserted line —
+                # reusing the ORIGINAL anchor_line for every call would
+                # insert all lines right after it in reverse order (each
+                # later call would land before the previous insert).
+                cur_anchor = anchor_line
+                for cand in new_lines:
+                    layout_html = _insert_line_into_layout(
+                        layout_html, cur_anchor, cand)
+                    cur_anchor = cand
+
+        if not merged:
+            return text, layout_html
         text = "\n".join(lines)
-
-        if layout_html:
-            # Chain the anchor forward onto each just-inserted line —
-            # reusing the ORIGINAL anchor_line for every call would
-            # insert all 4 lines right after it in reverse order (each
-            # later call would land before the previous insert).
-            cur_anchor = anchor_line
-            for cand in new_lines:
-                layout_html = _insert_line_into_layout(
-                    layout_html, cur_anchor, cand)
-                cur_anchor = cand
-
         print(f"[INFO] Page {page_num}: CBC fishbone merged "
-              f"({len(values)} value(s))")
+              f"({merged} cluster(s))")
         return text, layout_html
     except Exception as e:
         print(f"[WARNING] Page {page_num}: fishbone merge skipped ({e})")
@@ -3432,6 +3517,57 @@ def _strip_blank_field_uncertainty(text: str, layout_html: str) -> tuple:
         return text, layout_html
     except Exception as e:
         print(f"[WARNING] blank-field uncertainty cleanup skipped ({e})")
+        return text, layout_html
+
+
+_HW_SPAN_OPEN_RX = re.compile(r'class\s*=\s*["\'][^"\']*\bhw\b', re.IGNORECASE)
+
+
+def _strip_printed_word_uncertainty(text: str, layout_html: str) -> tuple:
+    """
+    A "(?)" may only survive on a word that sits inside a
+    <span class="hw"> block in the layout HTML — i.e. actual
+    handwriting. Any "(?)" landing on printed/typed content (outside
+    an hw span) is stripped from both text and layout, regardless of
+    which pass marked it (self-uncertainty during the main read, or
+    the audit critic): printed text is read essentially perfectly by
+    the vision model, so there's nothing to double-check about it —
+    only handwriting is ever ambiguous enough to warrant a flag. Never
+    raises.
+    """
+    if not layout_html or "(?)" not in (text or ""):
+        return text, layout_html
+    try:
+        parts = re.split(r"(<[^>]*>)", layout_html)
+        depth = 0  # <span> nesting depth while inside an hw span
+        stripped_words = []
+        out = []
+        for part in parts:
+            if part.startswith("<"):
+                low = part.lower()
+                if low.startswith("<span"):
+                    if depth:
+                        depth += 1
+                    elif _HW_SPAN_OPEN_RX.search(low):
+                        depth = 1
+                elif low.startswith("</span") and depth:
+                    depth -= 1
+                out.append(part)
+                continue
+            if depth == 0 and "(?)" in part:
+                def _strip(m):
+                    stripped_words.append(m.group(1))
+                    return m.group(1)
+                part = re.sub(r"(\S+)(\(\?\))", _strip, part)
+            out.append(part)
+        if not stripped_words:
+            return text, layout_html
+        layout_html = "".join(out)
+        for w in stripped_words:
+            text = text.replace(f"{w}(?)", w, 1)
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] printed-text uncertainty cleanup skipped ({e})")
         return text, layout_html
 
 
@@ -3835,8 +3971,14 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
         page_num, text, layout_html)
     # Universal backstop: a blank field's label is never highlighted,
     # whichever pass marked it — self-uncertainty during the main read,
-    # or the audit critic. Runs last so it catches every source.
+    # or the audit critic.
     text, layout_html = _strip_blank_field_uncertainty(text, layout_html)
+    # Broader universal backstop: (?) may only survive on actual
+    # handwriting (a <span class="hw"> block) — printed/typed text is
+    # never highlighted, regardless of which pass marked it. Runs last
+    # so it catches every source, including anything the two prompt
+    # rules (main read + audit) still let through.
+    text, layout_html = _strip_printed_word_uncertainty(text, layout_html)
     if layout_html:
         layout_html = _wrap_uncertain(layout_html)
     return text, layout_html, layout_error, b64_image
