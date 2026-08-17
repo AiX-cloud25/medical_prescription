@@ -1402,7 +1402,13 @@
 
             // Step 2 — Poll GET /api/jobs/{job_id} until done or error
             const POLL_INTERVAL_MS = 4000;
-            const MAX_POLLS = 900; // 4s × 900 = 60 min max
+            const MAX_POLLS = 3600; // 4s × 3600 = 240 min (4h) max — the
+            // backend job itself has no server-side timeout; this is only
+            // a client-side sanity backstop against an infinite polling
+            // loop. Large multi-page documents on the 72B model (multiple
+            // calls per page: read, verify, header, diagram, audit) can
+            // legitimately take well over an hour — raise further if you
+            // see this fire on real documents.
             for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
               await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
               const pollRes = await fetch(api(`/api/jobs/${jobId}`));
@@ -1417,7 +1423,7 @@
               }
               // status is "queued" or "running" — keep polling
             }
-            throw new Error("Extraction timed out after 60 minutes");
+            throw new Error("Extraction timed out after 4 hours");
           } catch (e) {
             setDocs((ds) => ds.map((d) => (d.id === item.id ? { ...d, status: "error", error: String(e.message || e) } : d)));
           } finally {
