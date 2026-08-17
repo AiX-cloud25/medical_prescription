@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-17-r18"
+EXTRACTOR_BUILD = "2026-08-17-r19"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -155,6 +155,16 @@ C. TWO-COLUMN FORM PAGE
    - Handwriting placed to the RIGHT of a heading on the same row
      (e.g. a value written beside "P.B.") belongs to that row —
      extract it too.
+   - A small handwritten mark or short note squeezed into the narrow
+     gap between a checklist item and an adjacent diagram/drawing
+     (e.g. a circled symbol or a word like "Pallor +" answering
+     "Eyes: Icterus, Pallor, any other") still belongs to THAT
+     checklist line — insert it immediately after the line it
+     answers, in the position it appears on the page. Never collect
+     stray handwritten annotations from throughout the page and
+     append them together at the very end (e.g. after the signature/
+     date fields) — that destroys which checklist item each one
+     answers.
 
 If you are NOT CERTAIN the page shows a printed results grid, treat it
 as a note page (B) — do not create a table.
@@ -179,6 +189,12 @@ A printed label with no filled value is STILL output, as
   Label : (blank)
 Never skip a label because it is empty (e.g. Clinical History,
 Examination Findings, Investigation, Diagnosis on an unfilled form).
+Never fill a blank label with a number or word from somewhere else on
+the page just because it's nearby (e.g. a follow-up visit's date or a
+CBC fishbone value sitting near an unfilled "Age :"/"Hospital No. :"
+field on a follow-up-notes page belongs to THAT diagram/date, never to
+the blank field beside it) — if the label's own value is not written,
+it is (blank), even when other handwriting is close by.
 
 5. SECTION HEADINGS
 Preserve printed section headings in UPPERCASE.
@@ -1442,6 +1458,9 @@ _LOCAL_USER_RULES = (
     "labeled lines (Hemoglobin / Total count / Neutrophil or Blast % / "
     "Platelets), paired with its visit Date if one is written beside "
     "it, never a table, never a diagram.\n"
+    "- A handwritten mark/note squeezed beside a checklist item (even "
+    "next to an adjacent diagram) is inserted right after THAT line — "
+    "never batched together and appended at the end of the page.\n"
     "- Your FIRST output line is the topmost visible text on the page — "
     "IDs, UHID numbers, tokens, room numbers, URLs at the top edge "
     "included.\n"
@@ -2443,9 +2462,14 @@ _HEADER_SYSTEM = (
     "typically contains the letterhead / facility name, a report title, "
     "and a printed patient-details box. Output EVERY visible text line, "
     "top to bottom — facility lines as written, patient details as "
-    "Label : Value lines. Plain text only, no markdown, no commentary. "
-    "English/Roman characters only (translate or transliterate any "
-    "regional-script text). " + _NO_CROSS_PAGE_RULE
+    "Label : Value lines. If a label (e.g. Age, Hospital No.) has no "
+    "value written after it, output it as Label : (blank) — never fill "
+    "it with a number or word from elsewhere nearby (a visit date, a "
+    "CBC fishbone value, or any other unrelated handwriting); a blank "
+    "field stays blank unless ITS OWN value is written right there. "
+    "Plain text only, no markdown, no commentary. English/Roman "
+    "characters only (translate or transliterate any regional-script "
+    "text). " + _NO_CROSS_PAGE_RULE
 )
 
 
