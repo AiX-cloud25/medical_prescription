@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-17-r14"
+EXTRACTOR_BUILD = "2026-08-17-r15"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -321,6 +321,55 @@ ECOG is a performance status (e.g. ECOG-2) — never transcribe it as
 "ECG-2" when written beside a general-examination note.
 A small hand-drawn triangle (Δ / delta) is clinical shorthand — output
 it as text on its line (use "Δ"); it is never a diagram or image.
+
+Doctors often summarize a CBC with a small hand-drawn cross/branch
+diagram — sometimes called a hemogram tree or "fishbone" — instead of
+writing labels for each value. The four values and their conventional
+positions:
+- Hemoglobin (Hb): near the LEFT of the branch point, often with a
+  "g" or "gm%" suffix (e.g. 10.2, 19g).
+- Total (WBC) Count (TC/TLC): near the TOP/UPPER-RIGHT of the branch
+  point, typically a 3-5 digit number, sometimes abbreviated in
+  thousands (e.g. 9.0 meaning ~9000, or written out as 9200).
+- Differential Count/Neutrophil %: near the BOTTOM/LOWER part of the
+  diagram, typically 0-100, often with a % sign or a trailing dot
+  (e.g. 6.6, 69.1.).
+- Platelet Count (Plt): near the BOTTOM-LEFT or pointed to by its own
+  arrow, typically suffixed "L" for lakh (e.g. 4L, 2.6L), or a larger
+  raw number if not abbreviated.
+Use BOTH signals together — position in the diagram AND each value's
+own format (magnitude + suffix) — to decide which value is which; they
+should agree. Labels are sometimes spelled out beside the value and
+connected by an arrow, sometimes the values stand alone with no
+written label at all — read the value's position and format the same
+way either time.
+This is shorthand notation, not a printed results grid (see TABLES)
+and not a clinical drawing — even though Hb/TC/DC/Plt are lab-style
+values, never format this as a pipe table, and never report it as a
+diagram. Transcribe it as four separate labeled lines. Keep every
+digit and punctuation mark exactly as written — add the label, never
+invent or complete a value (e.g. do not turn "69.1." into "69%").
+Two worked examples:
+  Handwritten: "hemoglobin" with an arrow to 10.2; "total count" with
+  an arrow to 9.0; "neutrophil" with an arrow to 6.6; "Platelets" with
+  an arrow to 4L.
+  Output:
+    Hemoglobin = 10.2
+    Total count = 9.0
+    Neutrophil = 6.6
+    Platelets = 4L
+
+  Handwritten (no labels, just the diagram): "19g" upper-left, "9200"
+  upper-right joined to it by a short branch, "69.1." below the
+  branch, "2.6L" to the lower-left.
+  Output:
+    Hemoglobin = 19g
+    Total count = 9200
+    Neutrophil = 69.1.
+    Platelets = 2.6L
+Label only the values you can confidently place using both signals; if
+a value's role is genuinely unclear, transcribe it verbatim rather
+than guessing a label.
 
 --------------------------------------
 TNM / STAGE GRIDS
@@ -1344,6 +1393,9 @@ _LOCAL_USER_RULES = (
     "transliterated, not translated).\n"
     "- Complaint lines start with C/o (Complains of) — never transcribed as "
     "\"y/o\" or \"40\".\n"
+    "- A hand-drawn Hb/TC/DC/Plt CBC cross/branch (fishbone) -> four "
+    "labeled lines (Hemoglobin / Total count / Neutrophil / Platelets), "
+    "never a table, never a diagram.\n"
     "- Your FIRST output line is the topmost visible text on the page — "
     "IDs, UHID numbers, tokens, room numbers, URLs at the top edge "
     "included.\n"
@@ -2745,6 +2797,9 @@ _DIAGRAM_SYSTEM = (
     "'R' used as a footnote/reference marker) — this is NOT a drawing, "
     "even though it has an arrow and a label like a real anatomy figure "
     "would\n"
+    "- the small connecting cross/branch lines of a hand-drawn "
+    "Hb/TC/DC/Plt CBC summary (see MEDICAL SHORTHAND) — never report "
+    "this as a diagram, it is shorthand text\n"
     "- hospital/clinic logos, letterhead emblems, medical symbols "
     "(caduceus, cross), barcodes, QR codes, stamps, signatures, "
     "watermarks, photographs, and PURELY DECORATIVE printed graphics "
@@ -2785,7 +2840,10 @@ _DIAGRAM_VERIFY_SYSTEM = (
     "underline, or plus/minus sign. A small circle around a single "
     "digit or letter with an arrow to a word (a footnote/reference "
     "marker, e.g. circled '1' or circled 'R') is a symbol, not a "
-    "drawing, even though it has an arrow and a label.\n"
+    "drawing, even though it has an arrow and a label. A hand-drawn "
+    "Hb/TC/DC/Plt CBC cross/branch diagram connecting a few numbers "
+    "(a hemogram 'fishbone', see MEDICAL SHORTHAND) is also a symbol, "
+    "not a drawing.\n"
     "Distinguish carefully: a circle or loop drawn AROUND an existing "
     "word or number (to select or highlight it) is text/symbol — but "
     "circles or ovals drawn as SHAPES representing anatomy (e.g. one or "
