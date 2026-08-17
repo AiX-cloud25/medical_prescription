@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-17-r15"
+EXTRACTOR_BUILD = "2026-08-17-r16"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -3131,6 +3131,127 @@ def _should_detect(text: str, layout_html: str) -> bool:
         r'class\s*=\s*["\'][^"\']*\bcut\b', layout_html))
 
 
+# ── Dedicated CBC "fishbone" detection pass ──────────────────────────
+# A prompt-only rule (MEDICAL SHORTHAND section of _READ_SYSTEM) asking
+# the combined read to restructure this hand-drawn Hb/TC/DC/Plt cross
+# into labeled lines was tried and confirmed NOT reliable on real
+# documents — the diagram's 2D layout is lost once flattened into the
+# combined pass's linear text, and there is no fixed token order to
+# regex against afterward. This focused call looks directly at the
+# page image (same architecture as _detect_diagrams/_recover_header/
+# _verify_completeness/_audit_words) for this one pattern only.
+_FISHBONE_SYSTEM = (
+    "You look at ONE medical document page image for a hand-drawn CBC "
+    "'fishbone'/cross diagram — NOT a printed table — a small pen "
+    "diagram connecting numeric values for Hemoglobin, Total (WBC) "
+    "Count, Differential Count/Neutrophil, and Platelet count with "
+    "short branch lines. Labels are sometimes written out beside a "
+    "value with an arrow, sometimes the values stand alone with no "
+    "label at all. Conventional layout: Hemoglobin near the left "
+    "(often 'g'/'gm%' suffix), Total Count near the top/upper-right "
+    "(3-5 digits), Differential/Neutrophil near the bottom (0-100, "
+    "often '%' or a trailing dot), Platelet count on the lower side "
+    "(often 'L' for lakh suffix, or a larger raw number). "
+    "Read each value DIRECTLY FROM THE IMAGE. Keep every digit and "
+    "punctuation mark exactly as written — never invent, complete, or "
+    "normalize a value (do not turn '69.1.' into '69%' or '70,000' "
+    "into '70000'). If you cannot confidently place a value's role, "
+    "leave that field null rather than guessing. If this page has no "
+    "such diagram, say so.\n"
+    'Output ONLY JSON: {"found": true|false, "hemoglobin": "<value or '
+    'null>", "total_count": "<value or null>", "neutrophil": "<value '
+    'or null>", "platelets": "<value or null>"}.'
+)
+_FISHBONE_USER = ("Find the CBC fishbone/cross diagram on this page, if "
+                  "any, and return the JSON now.")
+
+
+def _detect_cbc_fishbone(b64_image: str, page_num: int):
+    """
+    One focused vision call reading the CBC fishbone directly from the
+    image, where its 2D layout is still intact. Returns the parsed
+    dict on a genuine find, or None (nothing found / failure). Never
+    raises.
+    """
+    try:
+        raw, _ = _ollama_chat(_FISHBONE_SYSTEM, _FISHBONE_USER,
+                              [b64_image], 300, json_mode=True)
+        parsed = _parse_json_loose(raw) if raw else {}
+        if not isinstance(parsed, dict) or not parsed.get("found"):
+            return None
+        fields = ("hemoglobin", "total_count", "neutrophil", "platelets")
+        if not any(str(parsed.get(f) or "").strip() for f in fields):
+            return None
+        return parsed
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: fishbone detection skipped "
+              f"({e})")
+        return None
+
+
+_FISHBONE_LABELS = (
+    ("hemoglobin", "Hemoglobin"),
+    ("total_count", "Total count"),
+    ("neutrophil", "Neutrophil"),
+    ("platelets", "Platelets"),
+)
+
+
+def _merge_cbc_fishbone(page_num: int, text: str, layout_html: str,
+                        result) -> tuple:
+    """
+    Inserts "Label = value" lines for a detected CBC fishbone right
+    after the raw scattered numbers it was drawn from — never deletes
+    or alters the original transcription, only adds the interpreted
+    values beside it. Never raises.
+    """
+    if not result:
+        return text, layout_html
+    try:
+        values = []
+        for key, label in _FISHBONE_LABELS:
+            v = str(result.get(key) or "").strip()
+            if v:
+                values.append((label, v))
+        if not values:
+            return text, layout_html
+
+        lines = text.splitlines()
+        anchor_idx = None
+        for _, v in values:
+            for i, ln in enumerate(lines):
+                if v in ln:
+                    anchor_idx = i
+                    break
+            if anchor_idx is not None:
+                break
+
+        new_lines = [f"{label} = {v}" for label, v in values]
+        anchor_line = lines[anchor_idx] if anchor_idx is not None else (
+            lines[-1] if lines else "")
+        insert_at = (anchor_idx + 1) if anchor_idx is not None else len(lines)
+        lines[insert_at:insert_at] = new_lines
+        text = "\n".join(lines)
+
+        if layout_html:
+            # Chain the anchor forward onto each just-inserted line —
+            # reusing the ORIGINAL anchor_line for every call would
+            # insert all 4 lines right after it in reverse order (each
+            # later call would land before the previous insert).
+            cur_anchor = anchor_line
+            for cand in new_lines:
+                layout_html = _insert_line_into_layout(
+                    layout_html, cur_anchor, cand)
+                cur_anchor = cand
+
+        print(f"[INFO] Page {page_num}: CBC fishbone merged "
+              f"({len(values)} value(s))")
+        return text, layout_html
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: fishbone merge skipped ({e})")
+        return text, layout_html
+
+
 # ── Wrong-word audit pass ────────────────────────────────────────────
 # Self-marked (?) uncertainty has a ceiling: a model that misreads
 # confidently never marks itself. This pass shows the model the finished
@@ -3667,6 +3788,15 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
         dets, page_size = _detect_diagrams(b64_image, page_num)
         text, layout_html = _merge_diagram_boxes(
             text, layout_html, dets, page_size)
+    # Dedicated CBC fishbone (Hb/TC/DC/Plt cross) pass: the combined
+    # read flattens this 2D diagram's layout into scattered raw numbers
+    # (confirmed unreliable via prompt-only fix alone) — this focused
+    # call reads it directly from the image and adds labeled lines
+    # beside the untouched raw transcription.
+    if text and _page_has_handwriting(text, layout_html):
+        fishbone = _detect_cbc_fishbone(b64_image, page_num)
+        text, layout_html = _merge_cbc_fishbone(
+            page_num, text, layout_html, fishbone)
     # Strip any hallucinated "Table 1" caption before table enforcement,
     # so it can't get swept up as part of a spliced-in table's anchor.
     text, layout_html = _strip_table_captions(text, layout_html)
