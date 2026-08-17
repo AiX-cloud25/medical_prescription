@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-14-r13"
+EXTRACTOR_BUILD = "2026-08-17-r14"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -3123,6 +3123,15 @@ _AUDIT_USER = (
     "JSON now."
 )
 
+_AUDIT_SPELL_HINT = (
+    "\n\nA spelling dictionary also flagged these words in the "
+    "transcription as not recognized English or medical vocabulary: "
+    "{spell_words}. They may be genuine transcription errors, or may "
+    "be correct names, shorthand, or terms the dictionary simply "
+    "doesn't know — check each one against the image like any other "
+    "word before deciding whether to report it."
+)
+
 
 # A line that is ENTIRELY a printed field label with nothing filled in
 # after it (e.g. "Pos.:", "Doctor:", "Sex:") — a blank field. There is
@@ -3130,6 +3139,90 @@ _AUDIT_USER = (
 # flagging its label is never useful — suppress deterministically rather
 # than trust the model to keep following the equivalent prompt rule.
 _BLANK_LABEL_LINE_RX = re.compile(r"^[^:]{1,40}:\s*$")
+
+
+# ── Spell-check candidate generator (English + medical vocabulary) ────
+# A second, independent signal alongside the model's own self-doubt: a
+# library-recognized word list flags words that aren't valid English OR
+# medical vocabulary. This NEVER highlights anything by itself — flagged
+# words are only added as a hint to the audit critic call above, which
+# still has to see an actual mismatch against the page image before
+# marking anything (?). This mirrors medgemma_corrector.py's whitelist
+# pattern (data/known_drugs.txt) but adds a broader medical wordlist and
+# feeds candidates INTO the existing image cross-check instead of a
+# standalone correction pass.
+try:
+    from spellchecker import SpellChecker as _SpellChecker
+    _SPELLCHECK_AVAILABLE = True
+except ImportError:
+    _SpellChecker = None
+    _SPELLCHECK_AVAILABLE = False
+
+_SPELLCHECK_AUDIT = os.getenv("SPELLCHECK_AUDIT", "1").strip().lower() in (
+    "1", "true", "yes", "on")
+
+_SPELLCHECK_WORD_RX = re.compile(r"[A-Za-z][A-Za-z\-']{2,}")
+
+
+def _load_word_list(filename: str) -> list:
+    path = os.path.join(os.path.dirname(__file__), "data", filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [ln.strip() for ln in f
+                    if ln.strip() and not ln.startswith("#")]
+    except OSError:
+        return []
+
+
+_SPELL_CHECKER = None
+if _SPELLCHECK_AVAILABLE:
+    try:
+        _SPELL_CHECKER = _SpellChecker()
+        _medical_vocab = (_load_word_list("known_drugs.txt")
+                           + _load_word_list("medical_terms.txt"))
+        if _medical_vocab:
+            _SPELL_CHECKER.word_frequency.load_words(_medical_vocab)
+        print(f"[INFO] spell-checker ready ({len(_medical_vocab)} "
+              "domain word(s) merged into dictionary)")
+    except Exception as e:
+        print(f"[WARNING] spell-checker init failed, disabling ({e})")
+        _SPELL_CHECKER = None
+        _SPELLCHECK_AVAILABLE = False
+
+
+def _spellcheck_candidates(text: str) -> list:
+    """
+    Words in `text` that the merged English+medical dictionary doesn't
+    recognize — candidates worth a second look, NOT flags. Blank-field
+    label lines and ALL-CAPS tokens (usually legitimate but unlisted
+    abbreviations) are excluded to keep the candidate list precise.
+    Never raises; returns [] on any failure or when disabled.
+    """
+    if not (_SPELLCHECK_AVAILABLE and _SPELLCHECK_AUDIT and text):
+        return []
+    try:
+        tokens = []
+        seen_lower = set()
+        for line in text.splitlines():
+            if _BLANK_LABEL_LINE_RX.match(line.strip()):
+                continue
+            for m in _SPELLCHECK_WORD_RX.finditer(line):
+                word = m.group(0)
+                if word.isupper():
+                    continue
+                lw = word.lower()
+                if lw in seen_lower:
+                    continue
+                seen_lower.add(lw)
+                tokens.append(word)
+        if not tokens:
+            return []
+        unknown = _SPELL_CHECKER.unknown([w.lower() for w in tokens])
+        candidates = [w for w in tokens if w.lower() in unknown]
+        return candidates[:20]
+    except Exception as e:
+        print(f"[WARNING] spell-check candidate generation failed ({e})")
+        return []
 
 
 def _strip_blank_field_uncertainty(text: str, layout_html: str) -> tuple:
@@ -3164,20 +3257,27 @@ def _strip_blank_field_uncertainty(text: str, layout_html: str) -> tuple:
 
 
 def _audit_words(b64_image: str, page_num: int, text: str,
-                 layout_html: str) -> tuple:
+                 layout_html: str, spell_candidates: list = None) -> tuple:
     """
     One critic call that flags misread words. Each accepted flag appends
     "(?)" to the word in text AND layout, so the existing _wrap_uncertain
     pipeline turns it into a highlighted span. Marks only — never
     replaces the transcribed word. Blank-field label lines are never
-    flagged, regardless of what the model says. Never raises.
+    flagged, regardless of what the model says. `spell_candidates`
+    (optional) are words a spelling dictionary couldn't recognize — they
+    are only added as a hint for the model to re-check against the
+    image, never flagged directly. Never raises.
     """
     try:
         lines = text.splitlines()
         numbered = "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(lines))
+        user_msg = _AUDIT_USER.format(page=page_num, numbered=numbered)
+        if spell_candidates:
+            user_msg += _AUDIT_SPELL_HINT.format(
+                spell_words=", ".join(spell_candidates))
         raw, _ = _ollama_chat(
             _AUDIT_SYSTEM,
-            _AUDIT_USER.format(page=page_num, numbered=numbered),
+            user_msg,
             [b64_image],
             1500,
             json_mode=True,
@@ -3516,18 +3616,27 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     # text is clearly tabular but the model's own layout has none (or a
     # degenerate one).
     text, layout_html = _enforce_lab_tables(page_num, text, layout_html)
+    # Spell-check candidates: only ever computed on pages with SOME
+    # handwriting (pure or mixed) — a fully printed page already reads
+    # reliably and is never spell-checked or audited on this account.
+    spell_candidates = (
+        _spellcheck_candidates(text)
+        if _page_has_handwriting(text, layout_html) else [])
     # Wrong-word audit: critic pass flags misread words with (?) so they
     # come out red for the client to correct. Runs when the page has
     # genuine self-marked uncertainty, OR when handwriting makes up a
-    # meaningful share of the page (not just a trace) — a page that's
-    # almost entirely printed skips the full-page critique so it can't
-    # false-flag correct printed labels near a small handwritten bit.
+    # meaningful share of the page (not just a trace), OR the spell
+    # checker surfaced candidates — a page that's almost entirely
+    # printed with no handwriting skips the full-page critique so it
+    # can't false-flag correct printed labels near a small handwritten
+    # bit.
     if _AUDIT and text and (
             "(?)" in text
             or _handwriting_fraction(text, layout_html)
-            >= _AUDIT_MIN_HW_FRACTION):
+            >= _AUDIT_MIN_HW_FRACTION
+            or spell_candidates):
         text, layout_html = _audit_words(
-            b64_image, page_num, text, layout_html)
+            b64_image, page_num, text, layout_html, spell_candidates)
     text = _fix_shorthand(text)
     layout_html = _fix_shorthand_html(layout_html)
     # Remove any duplicate "Circle (If) Positive" checklist occurrence

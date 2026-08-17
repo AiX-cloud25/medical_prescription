@@ -6,6 +6,7 @@ Pillow>=10.0.0
 pypdfium2>=5.7.0
 requests>=2.31.0
 pymssql>=2.2
+pyspellchecker>=0.8.1
 
 # Optional: offline neural MT for regional-script (Kannada/Hindi/Tamil/...)
 # translation — better quality than the model-based fallback for isolated
