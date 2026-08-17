@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-17-r17"
+EXTRACTOR_BUILD = "2026-08-17-r18"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -3396,6 +3396,13 @@ _AUDIT_SPELL_HINT = (
     "word before deciding whether to report it."
 )
 
+_AUDIT_HW_FOCUS_HINT = (
+    "\n\nLines {lines} contain handwriting — concentrate your review "
+    "there. Printed/typed lines are essentially never wrong; only "
+    "report a handwritten word when you are not confident it matches "
+    "the image, or you can clearly see it's wrong."
+)
+
 
 # A line that is ENTIRELY a printed field label with nothing filled in
 # after it (e.g. "Pos.:", "Doctor:", "Sex:") — a blank field. There is
@@ -3454,31 +3461,46 @@ if _SPELLCHECK_AVAILABLE:
         _SPELLCHECK_AVAILABLE = False
 
 
-def _spellcheck_candidates(text: str) -> list:
+def _extract_hw_text(layout_html: str) -> str:
+    """Plain-text content of every <span class="hw"> block, concatenated
+    (inner tags stripped). Reused wherever a pass needs to look at ONLY
+    the handwritten content of a page, not printed/typed text. Never
+    raises."""
+    if not layout_html:
+        return ""
+    try:
+        return " ".join(_INNER_TAG_RX.sub(" ", m)
+                        for m in _HW_SPAN_RX.findall(layout_html))
+    except Exception:
+        return ""
+
+
+def _spellcheck_candidates(layout_html: str) -> list:
     """
-    Words in `text` that the merged English+medical dictionary doesn't
-    recognize — candidates worth a second look, NOT flags. Blank-field
-    label lines and ALL-CAPS tokens (usually legitimate but unlisted
+    Words INSIDE <span class="hw"> blocks (actual handwriting only —
+    never printed/typed text) that the merged English+medical
+    dictionary doesn't recognize — candidates worth a second look, NOT
+    flags. ALL-CAPS tokens (usually legitimate but unlisted
     abbreviations) are excluded to keep the candidate list precise.
     Never raises; returns [] on any failure or when disabled.
     """
-    if not (_SPELLCHECK_AVAILABLE and _SPELLCHECK_AUDIT and text):
+    if not (_SPELLCHECK_AVAILABLE and _SPELLCHECK_AUDIT and layout_html):
         return []
     try:
+        hw_text = _extract_hw_text(layout_html)
+        if not hw_text.strip():
+            return []
         tokens = []
         seen_lower = set()
-        for line in text.splitlines():
-            if _BLANK_LABEL_LINE_RX.match(line.strip()):
+        for m in _SPELLCHECK_WORD_RX.finditer(hw_text):
+            word = m.group(0)
+            if word.isupper():
                 continue
-            for m in _SPELLCHECK_WORD_RX.finditer(line):
-                word = m.group(0)
-                if word.isupper():
-                    continue
-                lw = word.lower()
-                if lw in seen_lower:
-                    continue
-                seen_lower.add(lw)
-                tokens.append(word)
+            lw = word.lower()
+            if lw in seen_lower:
+                continue
+            seen_lower.add(lw)
+            tokens.append(word)
         if not tokens:
             return []
         unknown = _SPELL_CHECKER.unknown([w.lower() for w in tokens])
@@ -3486,6 +3508,31 @@ def _spellcheck_candidates(text: str) -> list:
         return candidates[:20]
     except Exception as e:
         print(f"[WARNING] spell-check candidate generation failed ({e})")
+        return []
+
+
+def _handwritten_line_numbers(text: str, layout_html: str) -> list:
+    """
+    1-based line numbers (matching _audit_words' numbered transcript,
+    "1: ...", "2: ...") whose content overlaps with a <span class="hw">
+    block — i.e. lines that contain actual handwriting. Best-effort
+    text-to-layout word overlap; used only to point the audit critic's
+    attention, never to decide what gets flagged. Never raises.
+    """
+    if not text or not layout_html:
+        return []
+    try:
+        hw_words = set(re.findall(r"[a-z0-9]{2,}",
+                                  _extract_hw_text(layout_html).lower()))
+        if not hw_words:
+            return []
+        nums = []
+        for i, ln in enumerate(text.splitlines()):
+            ln_words = set(re.findall(r"[a-z0-9]{2,}", ln.lower()))
+            if ln_words & hw_words:
+                nums.append(i + 1)
+        return nums
+    except Exception:
         return []
 
 
@@ -3578,15 +3625,21 @@ def _audit_words(b64_image: str, page_num: int, text: str,
     "(?)" to the word in text AND layout, so the existing _wrap_uncertain
     pipeline turns it into a highlighted span. Marks only — never
     replaces the transcribed word. Blank-field label lines are never
-    flagged, regardless of what the model says. `spell_candidates`
-    (optional) are words a spelling dictionary couldn't recognize — they
-    are only added as a hint for the model to re-check against the
-    image, never flagged directly. Never raises.
+    flagged, regardless of what the model says. The prompt is told
+    which numbered lines contain handwriting (_handwritten_line_numbers)
+    so it concentrates there rather than re-scrutinizing printed lines.
+    `spell_candidates` (optional) are words a spelling dictionary
+    couldn't recognize — they are only added as a hint for the model to
+    re-check against the image, never flagged directly. Never raises.
     """
     try:
         lines = text.splitlines()
         numbered = "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(lines))
         user_msg = _AUDIT_USER.format(page=page_num, numbered=numbered)
+        hw_lines = _handwritten_line_numbers(text, layout_html)
+        if hw_lines:
+            user_msg += _AUDIT_HW_FOCUS_HINT.format(
+                lines=", ".join(str(n) for n in hw_lines))
         if spell_candidates:
             user_msg += _AUDIT_SPELL_HINT.format(
                 spell_words=", ".join(spell_candidates))
@@ -3940,11 +3993,11 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     # text is clearly tabular but the model's own layout has none (or a
     # degenerate one).
     text, layout_html = _enforce_lab_tables(page_num, text, layout_html)
-    # Spell-check candidates: only ever computed on pages with SOME
-    # handwriting (pure or mixed) — a fully printed page already reads
-    # reliably and is never spell-checked or audited on this account.
+    # Spell-check candidates: computed ONLY from words inside <span
+    # class="hw"> blocks (actual handwriting) — never from printed/
+    # typed text, and never at all on a fully printed page.
     spell_candidates = (
-        _spellcheck_candidates(text)
+        _spellcheck_candidates(layout_html)
         if _page_has_handwriting(text, layout_html) else [])
     # Wrong-word audit: critic pass flags misread words with (?) so they
     # come out red for the client to correct. Runs when the page has
