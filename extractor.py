@@ -41,7 +41,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-17-r19"
+EXTRACTOR_BUILD = "2026-08-18-r20"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -2017,8 +2017,11 @@ def read_page(
 
 # Structured-fields calls attach at most this many page images per call;
 # longer documents are processed in chunks and the results merged, so no
-# page is ever silently dropped.
-_FIELDS_MAX_PAGES = 5
+# page is ever silently dropped. Lower this if logs show repeated
+# "Fields read error: ... no parseable JSON object" — that error means
+# the model's JSON response got cut off before closing, which happens
+# under context/generation pressure from too many images in one call.
+_FIELDS_MAX_PAGES = int(os.getenv("FIELDS_MAX_PAGES", "4"))
 
 
 def _fields_single_call(system_prompt: str, images: list) -> tuple:
