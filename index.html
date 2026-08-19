@@ -566,8 +566,21 @@
       );
     }
 
-    function renderPageToCanvas(iframe, fragment) {
+    // A FRESH iframe per page, not a shared one reused across the whole
+    // export loop — html2canvas + repeated captures on the same reused
+    // iframe is a known source of blank/stale canvases on later pages in
+    // a sequential loop (leftover sizing/DOM state from the previous,
+    // often differently-sized, page bleeding into the next capture),
+    // even though the source HTML itself is completely fine. A new
+    // iframe per page costs a bit more DOM churn but fully isolates
+    // each capture.
+    function renderPageToCanvas(fragment) {
       return new Promise((resolve, reject) => {
+        const iframe = document.createElement("iframe");
+        iframe.setAttribute("sandbox", "allow-same-origin"); // deliberately NO allow-scripts
+        iframe.style.cssText =
+          "position:fixed;left:-10000px;top:0;width:" + EXPORT_PAGE_W_PX + "px;height:1123px;border:0;";
+        const cleanup = () => iframe.remove();
         iframe.onload = async () => {
           try {
             const idoc = iframe.contentDocument;
@@ -582,11 +595,14 @@
               logging: false,
               windowWidth: EXPORT_PAGE_W_PX,
             });
+            cleanup();
             resolve(canvas);
           } catch (e) {
+            cleanup();
             reject(e);
           }
         };
+        document.body.appendChild(iframe);
         iframe.srcdoc = buildLayoutDoc(fragment, true); // set AFTER onload is attached
       });
     }
@@ -618,48 +634,38 @@
       const usableW = PAGE_W - 2 * MARGIN;
       const usableH = PAGE_H - 2 * MARGIN;
 
-      const iframe = document.createElement("iframe");
-      iframe.setAttribute("sandbox", "allow-same-origin"); // deliberately NO allow-scripts
-      iframe.style.cssText =
-        "position:fixed;left:-10000px;top:0;width:" + EXPORT_PAGE_W_PX + "px;height:1123px;border:0;";
-      document.body.appendChild(iframe);
-
-      try {
-        let firstPdfPage = true;
-        for (let i = 0; i < pages.length; i++) { // sequential — bounds memory
-          if (onProgress) onProgress("page " + (i + 1) + "/" + pages.length);
-          const canvas = await renderPageToCanvas(iframe, pageFragment(pages[i]));
-          // Content taller than one A4 page is sliced across PDF pages at full
-          // width rather than shrunk to fit (dense pages stay readable).
-          const sliceHpx = Math.floor((usableH / usableW) * canvas.width);
-          for (let y = 0; y < canvas.height; y += sliceHpx) {
-            const hPx = Math.min(sliceHpx, canvas.height - y);
-            const slice = document.createElement("canvas");
-            slice.width = canvas.width;
-            slice.height = hPx;
-            const ctx = slice.getContext("2d");
-            ctx.fillStyle = "#ffffff";
-            ctx.fillRect(0, 0, slice.width, slice.height);
-            ctx.drawImage(canvas, 0, y, canvas.width, hPx, 0, 0, canvas.width, hPx);
-            // A slice with no real content (layout rounding/margin
-            // overflow after the last real line, e.g. below a floated
-            // image or the checklist's clearing div) would otherwise
-            // spawn its own blank PDF page — skip it, but keep scanning
-            // (never break: real content can resume after a blank gap).
-            if (y > 0 && isCanvasSliceBlank(ctx, slice.width, slice.height)) continue;
-            if (!firstPdfPage) pdf.addPage();
-            firstPdfPage = false;
-            pdf.addImage(
-              slice.toDataURL("image/jpeg", 0.85), "JPEG",
-              MARGIN, MARGIN, usableW, (hPx * usableW) / canvas.width,
-              undefined, "FAST"
-            );
-          }
+      let firstPdfPage = true;
+      for (let i = 0; i < pages.length; i++) { // sequential — bounds memory
+        if (onProgress) onProgress("page " + (i + 1) + "/" + pages.length);
+        const canvas = await renderPageToCanvas(pageFragment(pages[i]));
+        // Content taller than one A4 page is sliced across PDF pages at full
+        // width rather than shrunk to fit (dense pages stay readable).
+        const sliceHpx = Math.floor((usableH / usableW) * canvas.width);
+        for (let y = 0; y < canvas.height; y += sliceHpx) {
+          const hPx = Math.min(sliceHpx, canvas.height - y);
+          const slice = document.createElement("canvas");
+          slice.width = canvas.width;
+          slice.height = hPx;
+          const ctx = slice.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, slice.width, slice.height);
+          ctx.drawImage(canvas, 0, y, canvas.width, hPx, 0, 0, canvas.width, hPx);
+          // A slice with no real content (layout rounding/margin
+          // overflow after the last real line, e.g. below a floated
+          // image or the checklist's clearing div) would otherwise
+          // spawn its own blank PDF page — skip it, but keep scanning
+          // (never break: real content can resume after a blank gap).
+          if (y > 0 && isCanvasSliceBlank(ctx, slice.width, slice.height)) continue;
+          if (!firstPdfPage) pdf.addPage();
+          firstPdfPage = false;
+          pdf.addImage(
+            slice.toDataURL("image/jpeg", 0.85), "JPEG",
+            MARGIN, MARGIN, usableW, (hPx * usableW) / canvas.width,
+            undefined, "FAST"
+          );
         }
-        pdf.save((doc.file.name.replace(/\.[^.]+$/, "") || "document") + "_extracted.pdf");
-      } finally {
-        iframe.remove();
       }
+      pdf.save((doc.file.name.replace(/\.[^.]+$/, "") || "document") + "_extracted.pdf");
     }
 
     // ── Word export ──────────────────────────────────────────────
