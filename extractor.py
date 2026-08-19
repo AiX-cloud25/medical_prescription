@@ -2035,7 +2035,7 @@ def _fields_single_call(system_prompt: str, images: list) -> tuple:
     last_err = None
     for attempt in range(4):
         try:
-            raw, _reason = _ollama_chat(
+            raw, reason = _ollama_chat(
                 system_prompt,
                 fields_user,
                 images_b64,
@@ -2043,11 +2043,23 @@ def _fields_single_call(system_prompt: str, images: list) -> tuple:
                 json_mode=True,
             )
             if not raw:
-                print(f"[WARNING] Fields read empty, attempt {attempt + 1}/4")
+                print(f"[WARNING] Fields read empty (done_reason={reason!r}), "
+                      f"attempt {attempt + 1}/4")
                 if attempt < 3:
                     time.sleep(3)
                 continue
-            parsed = _parse_json_loose(raw)
+            try:
+                parsed = _parse_json_loose(raw)
+            except Exception as e:
+                # done_reason == "length" means num_predict was hit before
+                # the model finished — the JSON is genuinely truncated, not
+                # malformed. Surface that distinction so a repeat of this
+                # warning is diagnosable without re-running the call.
+                if reason == "length":
+                    raise ValueError(
+                        f"response truncated at the {_VISION_MAX_TOKENS}-token "
+                        f"output cap before the JSON closed ({e})") from e
+                raise
             fields = parsed.get("fields") or []
             medicines = parsed.get("medicines") or []
             if not isinstance(fields, list) or not isinstance(medicines, list):
