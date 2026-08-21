@@ -559,28 +559,41 @@
     // resolution — so a large PDF (a high-DPI scan, or one with bulky
     // embedded images) only costs upload time/bandwidth and risks
     // tripping a host proxy's upload-size limit; it buys no extraction
-    // quality. Above a size threshold, re-render the PDF client-side at
-    // a DPI that already matches (with a small safety margin) what the
-    // server uses anyway, before it ever leaves the browser.
+    // quality. Files over PDF_COMPRESS_TARGET_BYTES are re-rendered
+    // client-side and re-encoded, aiming to land back under that same
+    // ceiling, before the file ever leaves the browser.
+    //
+    // A fixed 92%-quality first attempt was tried and confirmed
+    // insufficient on real documents (12.6MB and 16.2MB outputs still
+    // hit the proxy's 500) — real scans compress less than expected at
+    // high quality. DPI is kept fixed at a small margin above the
+    // server's 300 DPI (reducing it further would be an actual quality
+    // loss, unlike JPEG quality); JPEG quality is what's iterated down
+    // instead, since it has by far the larger effect on file size and
+    // the expensive part (rendering each page) only needs to happen
+    // once — re-encoding the same rendered canvases at a lower quality
+    // and rebuilding the PDF is cheap, so trying several quality levels
+    // to hit the size ceiling costs little extra time.
     if (window.pdfjsLib) {
       window.pdfjsLib.GlobalWorkerOptions.workerSrc =
         "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
     }
-    const PDF_COMPRESS_THRESHOLD_BYTES = 8 * 1024 * 1024; // 8MB
-    const PDF_COMPRESS_TARGET_DPI = 350; // server uses 300 — small margin
-    const PDF_COMPRESS_JPEG_QUALITY = 0.92;
+    const PDF_COMPRESS_TARGET_DPI = 320; // server uses 300 — small margin
+    const PDF_COMPRESS_TARGET_BYTES = 6 * 1024 * 1024; // 6MB ceiling
+    const PDF_COMPRESS_QUALITY_STEPS = [0.85, 0.7, 0.55, 0.4, 0.25];
 
     async function compressPdfIfNeeded(file) {
       const isPdf = /\.pdf$/i.test(file.name || "") || file.type === "application/pdf";
-      if (!isPdf || file.size <= PDF_COMPRESS_THRESHOLD_BYTES || !window.pdfjsLib || !window.jspdf) {
+      if (!isPdf || file.size <= PDF_COMPRESS_TARGET_BYTES || !window.pdfjsLib || !window.jspdf) {
         return file;
       }
       try {
         const buf = await file.arrayBuffer();
         const doc = await window.pdfjsLib.getDocument({ data: buf }).promise;
-        const { jsPDF } = window.jspdf;
         const scale = PDF_COMPRESS_TARGET_DPI / 72;
-        let out = null;
+
+        // Render every page ONCE (the expensive part).
+        const rendered = [];
         for (let i = 1; i <= doc.numPages; i++) {
           const page = await doc.getPage(i);
           const viewport = page.getViewport({ scale });
@@ -591,27 +604,48 @@
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           await page.render({ canvasContext: ctx, viewport }).promise;
-          const jpeg = canvas.toDataURL("image/jpeg", PDF_COMPRESS_JPEG_QUALITY);
           // Page size in mm derived from the rendered pixels at the same
           // DPI, so pages keep their true size/aspect ratio.
           const wMm = (canvas.width / PDF_COMPRESS_TARGET_DPI) * 25.4;
           const hMm = (canvas.height / PDF_COMPRESS_TARGET_DPI) * 25.4;
-          const orientation = wMm > hMm ? "landscape" : "portrait";
-          if (!out) {
-            out = new jsPDF({ orientation, unit: "mm", format: [wMm, hMm], compress: true });
-          } else {
-            out.addPage([wMm, hMm], orientation);
-          }
-          out.addImage(jpeg, "JPEG", 0, 0, wMm, hMm, undefined, "FAST");
+          rendered.push({ canvas, wMm, hMm });
         }
-        if (!out) return file; // no pages read — fall back defensively
-        const blob = out.output("blob");
-        if (blob.size >= file.size) return file; // didn't help — keep original
+        if (!rendered.length) return file; // no pages read — fall back defensively
+
+        const { jsPDF } = window.jspdf;
+        const buildAt = (quality) => {
+          let out = null;
+          for (const { canvas, wMm, hMm } of rendered) {
+            const jpeg = canvas.toDataURL("image/jpeg", quality);
+            const orientation = wMm > hMm ? "landscape" : "portrait";
+            if (!out) {
+              out = new jsPDF({ orientation, unit: "mm", format: [wMm, hMm], compress: true });
+            } else {
+              out.addPage([wMm, hMm], orientation);
+            }
+            out.addImage(jpeg, "JPEG", 0, 0, wMm, hMm, undefined, "FAST");
+          }
+          return out.output("blob");
+        };
+
+        // Cheap re-encode/rebuild loop: try progressively lower JPEG
+        // quality only until the ceiling is met, so we never sacrifice
+        // more quality than actually needed for this specific document.
+        let best = buildAt(PDF_COMPRESS_QUALITY_STEPS[0]);
+        for (let s = 1; s < PDF_COMPRESS_QUALITY_STEPS.length
+                        && best.size > PDF_COMPRESS_TARGET_BYTES; s++) {
+          const candidate = buildAt(PDF_COMPRESS_QUALITY_STEPS[s]);
+          if (candidate.size < best.size) best = candidate;
+        }
+
+        if (best.size >= file.size) return file; // didn't help — keep original
         console.log(
           "[compress] " + file.name + ": " + (file.size / 1024 / 1024).toFixed(1) +
-          "MB -> " + (blob.size / 1024 / 1024).toFixed(1) + "MB"
+          "MB -> " + (best.size / 1024 / 1024).toFixed(1) + "MB" +
+          (best.size > PDF_COMPRESS_TARGET_BYTES
+            ? " (still above the target ceiling even at lowest quality)" : "")
         );
-        return new File([blob], file.name, { type: "application/pdf" });
+        return new File([best], file.name, { type: "application/pdf" });
       } catch (e) {
         console.warn("PDF compression failed, uploading original file:", e);
         return file; // never block the upload on a compression bug
