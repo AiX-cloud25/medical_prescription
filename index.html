@@ -354,13 +354,10 @@
     }
 
     /* ── Layout reconstruction + structured-data helpers ─────── */
-    function buildLayoutDoc(fragment, forExport) {
-      // Export capture uses html2canvas, whose internal clone iframe is blocked
-      // by default-src 'none' (implies frame-src 'none') — so the export doc
-      // denies every dangerous vector explicitly but leaves frames unrestricted.
-      const csp = forExport
-        ? "script-src 'none'; connect-src 'none'; object-src 'none'; media-src 'none'; font-src 'none'; form-action 'none'; style-src 'unsafe-inline'; img-src data:"
-        : "default-src 'none'; style-src 'unsafe-inline'; img-src data:";
+    // Used only for the live viewer iframe now — PDF export no longer
+    // renders through an iframe at all (see EXPORT_SCOPE_CSS below for why).
+    function buildLayoutDoc(fragment) {
+      const csp = "default-src 'none'; style-src 'unsafe-inline'; img-src data:";
       return (
         "<!DOCTYPE html><html><head>" +
         "<meta http-equiv=\"Content-Security-Policy\" content=\"" + csp + "\">" +
@@ -566,51 +563,80 @@
       );
     }
 
-    // A FRESH iframe per page, not a shared one reused across the whole
-    // export loop — html2canvas + repeated captures on the same reused
-    // iframe is a known source of blank/stale canvases on later pages in
-    // a sequential loop (leftover sizing/DOM state from the previous,
-    // often differently-sized, page bleeding into the next capture),
-    // even though the source HTML itself is completely fine.
+    // html2canvas scale factor — shared between the capture call and the
+    // marker-offset math below so the two can never drift apart.
+    const EXPORT_CANVAS_SCALE = 2;
+
+    // PDF export capture does NOT use an iframe — confirmed by direct
+    // testing that html2canvas@1.4.1 throws "Document is not attached to
+    // a Window" capturing content hosted inside an iframe's own document,
+    // 100% of the time, regardless of sandbox/CSP/content — even a bare
+    // iframe with no attributes and "hello world" as its entire body
+    // fails identically. The SAME content captured from a plain element
+    // in the main document succeeds every time. This is a known-class
+    // incompatibility between this html2canvas version and how current
+    // Chromium isolates iframe documents, not something fixable by
+    // managing iframe lifecycle more carefully (two earlier attempts at
+    // that — a fresh iframe per page, then deferred cleanup — both still
+    // hit this, because the failure happens DURING the capture call
+    // itself, not during teardown).
     //
-    // The iframe is deliberately NOT removed here, even on success —
-    // html2canvas's internal cleanup (it clones the target into its own
-    // temporary rendering context) can still be settling asynchronously
-    // for a moment after its returned promise resolves, and removing the
-    // iframe's document out from under that mid-flight work throws
-    // "Document is not attached to a Window". The caller collects every
-    // iframe this function creates and removes them all together only
-    // after the ENTIRE export is done, once every canvas has already
-    // been fully consumed.
-    function renderPageToCanvas(fragment) {
-      return new Promise((resolve, reject) => {
-        const iframe = document.createElement("iframe");
-        iframe.setAttribute("sandbox", "allow-same-origin"); // deliberately NO allow-scripts
-        iframe.style.cssText =
-          "position:fixed;left:-10000px;top:0;width:" + EXPORT_PAGE_W_PX + "px;height:1123px;border:0;";
-        iframe.onload = async () => {
-          try {
-            const idoc = iframe.contentDocument;
-            // Base64 stamp/signature crops must finish decoding before capture.
-            await Promise.all(Array.from(idoc.images).map((img) => img.decode().catch(() => {})));
-            // Grow the iframe to the full content height so nothing is clipped.
-            iframe.style.height = Math.max(idoc.documentElement.scrollHeight, 100) + "px";
-            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-            const canvas = await window.html2canvas(idoc.body, {
-              scale: 2,
-              backgroundColor: "#ffffff",
-              logging: false,
-              windowWidth: EXPORT_PAGE_W_PX,
-            });
-            resolve({ canvas, iframe });
-          } catch (e) {
-            iframe.remove();
-            reject(e);
-          }
-        };
-        document.body.appendChild(iframe);
-        iframe.srcdoc = buildLayoutDoc(fragment, true); // set AFTER onload is attached
-      });
+    // Rendering into the main document instead of a CSP-sandboxed iframe
+    // does give up that isolation layer, so the extracted HTML is passed
+    // through sanitizeFragment() (the same function edit-mode saves
+    // already rely on — strips scripts, event handlers, and any src/href
+    // that isn't a data:image URI) immediately before insertion, on top
+    // of the sanitization already applied server-side. The container is
+    // positioned off-screen and removed again right after capture.
+    const EXPORT_SCOPE_CLASS = "pdf-export-scope";
+    const EXPORT_SCOPE_CSS =
+      "." + EXPORT_SCOPE_CLASS + " { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; color: #1f2937; background: #fff; padding: 16px; box-sizing: border-box; }" +
+      "." + EXPORT_SCOPE_CLASS + " table { border-collapse: collapse; margin: 6px 0; clear: both; }" +
+      "." + EXPORT_SCOPE_CLASS + " .checklist { border: 1.5px solid #64748b; border-radius: 6px; padding: 8px 10px; margin: 6px 0; }" +
+      "." + EXPORT_SCOPE_CLASS + " td, ." + EXPORT_SCOPE_CLASS + " th { border: 1px solid #cbd5e1; padding: 6px 10px; font-size: 12px; line-height: 1.5; }" +
+      "." + EXPORT_SCOPE_CLASS + " .hw { font-family: inherit; color: inherit; }" +
+      "." + EXPORT_SCOPE_CLASS + " .stamp { display: inline-block; border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; transform: rotate(-2deg); margin: 2px; }" +
+      "." + EXPORT_SCOPE_CLASS + " .unc { color: #dc2626; font-weight: 700; }" +
+      "." + EXPORT_SCOPE_CLASS + " .qhide { display: none; }" +
+      "." + EXPORT_SCOPE_CLASS + " img.cut { max-width: 100%; height: auto; border-radius: 4px; }" +
+      "." + EXPORT_SCOPE_CLASS + " img.cut:not([src]) { border: 1.5px dashed #9333ea; color: #9333ea; border-radius: 6px; padding: 2px 8px; font-size: 11px; min-height: 18px; }";
+
+    async function renderCombinedToCanvas(fragment, pageCount) {
+      const style = document.createElement("style");
+      style.textContent = EXPORT_SCOPE_CSS;
+      document.head.appendChild(style);
+
+      const container = document.createElement("div");
+      container.className = EXPORT_SCOPE_CLASS;
+      container.style.cssText =
+        "position:fixed;left:-10000px;top:0;width:" + EXPORT_PAGE_W_PX + "px;";
+      container.innerHTML = sanitizeFragment(fragment);
+      document.body.appendChild(container);
+
+      try {
+        // Base64 stamp/signature crops must finish decoding before capture.
+        await Promise.all(Array.from(container.querySelectorAll("img")).map((img) => img.decode().catch(() => {})));
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // Record where each source page begins, in canvas pixel
+        // coordinates, BEFORE capture — offsetTop is only meaningful
+        // against the live DOM.
+        const markerYs = [];
+        for (let i = 0; i < pageCount; i++) {
+          const el = container.querySelector('[data-export-page-marker="' + i + '"]');
+          markerYs.push(el ? Math.round(el.offsetTop * EXPORT_CANVAS_SCALE) : 0);
+        }
+        const canvas = await window.html2canvas(container, {
+          scale: EXPORT_CANVAS_SCALE,
+          backgroundColor: "#ffffff",
+          logging: false,
+          windowWidth: EXPORT_PAGE_W_PX,
+        });
+        return { canvas, container, style, markerYs };
+      } catch (e) {
+        style.remove();
+        container.remove();
+        throw e;
+      }
     }
 
     // Sampled pixel check — true when a rendered slice is essentially
@@ -640,18 +666,23 @@
       const usableW = PAGE_W - 2 * MARGIN;
       const usableH = PAGE_H - 2 * MARGIN;
 
-      let firstPdfPage = true;
-      const usedIframes = [];
+      if (onProgress) onProgress("rendering document");
+      const combinedFragment = pages.map((p, i) =>
+        '<div data-export-page-marker="' + i + '">' + pageFragment(p) + "</div>"
+      ).join("");
+      const { canvas, container, style, markerYs } = await renderCombinedToCanvas(combinedFragment, pages.length);
       try {
-        for (let i = 0; i < pages.length; i++) { // sequential — bounds memory
+        let firstPdfPage = true;
+        const sliceHpx = Math.floor((usableH / usableW) * canvas.width);
+        for (let i = 0; i < pages.length; i++) {
           if (onProgress) onProgress("page " + (i + 1) + "/" + pages.length);
-          const { canvas, iframe } = await renderPageToCanvas(pageFragment(pages[i]));
-          usedIframes.push(iframe);
-          // Content taller than one A4 page is sliced across PDF pages at full
-          // width rather than shrunk to fit (dense pages stay readable).
-          const sliceHpx = Math.floor((usableH / usableW) * canvas.width);
-          for (let y = 0; y < canvas.height; y += sliceHpx) {
-            const hPx = Math.min(sliceHpx, canvas.height - y);
+          const startY = markerYs[i];
+          const endY = i + 1 < pages.length ? markerYs[i + 1] : canvas.height;
+          // Each source page always starts on its own fresh PDF page —
+          // sliced independently within [startY, endY) of the one big
+          // combined canvas, even though the capture itself was continuous.
+          for (let y = startY; y < endY; y += sliceHpx) {
+            const hPx = Math.min(sliceHpx, endY - y);
             const slice = document.createElement("canvas");
             slice.width = canvas.width;
             slice.height = hPx;
@@ -664,7 +695,7 @@
             // image or the checklist's clearing div) would otherwise
             // spawn its own blank PDF page — skip it, but keep scanning
             // (never break: real content can resume after a blank gap).
-            if (y > 0 && isCanvasSliceBlank(ctx, slice.width, slice.height)) continue;
+            if (y > startY && isCanvasSliceBlank(ctx, slice.width, slice.height)) continue;
             if (!firstPdfPage) pdf.addPage();
             firstPdfPage = false;
             pdf.addImage(
@@ -676,9 +707,8 @@
         }
         pdf.save((doc.file.name.replace(/\.[^.]+$/, "") || "document") + "_extracted.pdf");
       } finally {
-        // Every page's iframe is torn down together, only once the whole
-        // export (all captures already consumed into the PDF) is done.
-        usedIframes.forEach((f) => f.remove());
+        style.remove();
+        container.remove();
       }
     }
 
