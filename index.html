@@ -55,6 +55,7 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
   <script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 </head>
 <body class="bg-mint min-h-screen">
   <div id="root"></div>
@@ -550,6 +551,71 @@
     function escapeHtml(s) {
       return String(s == null ? "" : s)
         .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // ── Pre-upload PDF compression ───────────────────────────────
+    // The backend re-renders every PDF page at a FIXED 300 DPI
+    // (extractor.py's _RENDER_DPI) regardless of the uploaded file's own
+    // resolution — so a large PDF (a high-DPI scan, or one with bulky
+    // embedded images) only costs upload time/bandwidth and risks
+    // tripping a host proxy's upload-size limit; it buys no extraction
+    // quality. Above a size threshold, re-render the PDF client-side at
+    // a DPI that already matches (with a small safety margin) what the
+    // server uses anyway, before it ever leaves the browser.
+    if (window.pdfjsLib) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+    }
+    const PDF_COMPRESS_THRESHOLD_BYTES = 8 * 1024 * 1024; // 8MB
+    const PDF_COMPRESS_TARGET_DPI = 350; // server uses 300 — small margin
+    const PDF_COMPRESS_JPEG_QUALITY = 0.92;
+
+    async function compressPdfIfNeeded(file) {
+      const isPdf = /\.pdf$/i.test(file.name || "") || file.type === "application/pdf";
+      if (!isPdf || file.size <= PDF_COMPRESS_THRESHOLD_BYTES || !window.pdfjsLib || !window.jspdf) {
+        return file;
+      }
+      try {
+        const buf = await file.arrayBuffer();
+        const doc = await window.pdfjsLib.getDocument({ data: buf }).promise;
+        const { jsPDF } = window.jspdf;
+        const scale = PDF_COMPRESS_TARGET_DPI / 72;
+        let out = null;
+        for (let i = 1; i <= doc.numPages; i++) {
+          const page = await doc.getPage(i);
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.ceil(viewport.width);
+          canvas.height = Math.ceil(viewport.height);
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: ctx, viewport }).promise;
+          const jpeg = canvas.toDataURL("image/jpeg", PDF_COMPRESS_JPEG_QUALITY);
+          // Page size in mm derived from the rendered pixels at the same
+          // DPI, so pages keep their true size/aspect ratio.
+          const wMm = (canvas.width / PDF_COMPRESS_TARGET_DPI) * 25.4;
+          const hMm = (canvas.height / PDF_COMPRESS_TARGET_DPI) * 25.4;
+          const orientation = wMm > hMm ? "landscape" : "portrait";
+          if (!out) {
+            out = new jsPDF({ orientation, unit: "mm", format: [wMm, hMm], compress: true });
+          } else {
+            out.addPage([wMm, hMm], orientation);
+          }
+          out.addImage(jpeg, "JPEG", 0, 0, wMm, hMm, undefined, "FAST");
+        }
+        if (!out) return file; // no pages read — fall back defensively
+        const blob = out.output("blob");
+        if (blob.size >= file.size) return file; // didn't help — keep original
+        console.log(
+          "[compress] " + file.name + ": " + (file.size / 1024 / 1024).toFixed(1) +
+          "MB -> " + (blob.size / 1024 / 1024).toFixed(1) + "MB"
+        );
+        return new File([blob], file.name, { type: "application/pdf" });
+      } catch (e) {
+        console.warn("PDF compression failed, uploading original file:", e);
+        return file; // never block the upload on a compression bug
+      }
     }
 
     const EXPORT_PAGE_W_PX = 794; // A4 width (210mm) at 96dpi
@@ -1441,8 +1507,9 @@
         (async () => {
           try {
             // Step 1 — POST the file, get a job_id back immediately (no timeout risk)
+            const uploadFile = await compressPdfIfNeeded(item.file);
             const fd = new FormData();
-            fd.append("file", item.file, item.file.name);
+            fd.append("file", uploadFile, item.file.name);
             const res = await fetch(api("/api/extract"), { method: "POST", body: fd });
             const startData = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(startData.detail || startData.error || `Server error (${res.status})`);
