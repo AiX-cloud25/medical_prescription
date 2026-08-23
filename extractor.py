@@ -19,6 +19,7 @@ Public API:
 """
 
 import base64
+import contextlib
 import io
 import json
 import os
@@ -41,7 +42,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-18-r20"
+EXTRACTOR_BUILD = "2026-08-23-r21"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -3975,6 +3976,24 @@ def _fix_shorthand_html(html: str) -> str:
     return _SHORTHAND_HTML_BLOCK_RX.sub(r"\1C/o", html)
 
 
+@contextlib.contextmanager
+def _timed(page_num, label: str):
+    """
+    Logs how long the wrapped block took, as
+    "[TIMING] Page {page_num}: {label} = {seconds}s" — pure
+    instrumentation, changes no extraction behavior. page_num may be a
+    page number, or a string like "ALL" for whole-document spans.
+    monotonic() is used (not time()) since only the interval matters
+    and it's immune to system clock adjustments.
+    """
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        print(f"[TIMING] Page {page_num}: {label} = "
+              f"{time.monotonic() - t0:.1f}s")
+
+
 def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     """
     read_page + sparse-page rescue + missed-line verification + diagram
@@ -3986,14 +4005,17 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     differs from the input only when the rescue rotated the page), and
     MUST be the image crops are cut from.
     """
-    text, layout_html, layout_error, quality_flags = read_page(
-        b64_image, page_num, mime)
+    _page_t0 = time.monotonic()
+    with _timed(page_num, "main read"):
+        text, layout_html, layout_error, quality_flags = read_page(
+            b64_image, page_num, mime)
 
     # Essentially-empty page: most likely a rotation the orientation
     # probe missed — retry rotated before any downstream pass.
     nonblank = sum(1 for ln in (text or "").splitlines() if ln.strip())
     if nonblank < _RESCUE_MIN_LINES:
-        rescued = _rescue_sparse_page(b64_image, page_num)
+        with _timed(page_num, "sparse rescue"):
+            rescued = _rescue_sparse_page(b64_image, page_num)
         if rescued:
             text, b64_image = rescued
             text = _clean_checklist_sections(text)
@@ -4003,28 +4025,32 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     if _VERIFY and text and ("cjk" in quality_flags
                              or _header_suspect(text)
                              or _page_has_handwriting(text, layout_html)):
-        text, layout_html = _verify_completeness(
-            b64_image, page_num, text, layout_html)
+        with _timed(page_num, "verify completeness"):
+            text, layout_html = _verify_completeness(
+                b64_image, page_num, text, layout_html)
     # Top-strip check: guarantees top-of-page content (IDs, tokens,
     # titles, patient box) survives every run. "always" mode runs it on
     # every page — the merge only prepends genuinely missing lines.
     if text and (_HEADER_CHECK == "always"
                  or (_HEADER_CHECK == "suspect" and _header_suspect(text))):
-        text, layout_html = _recover_header(
-            b64_image, page_num, text, layout_html)
+        with _timed(page_num, "header recovery"):
+            text, layout_html = _recover_header(
+                b64_image, page_num, text, layout_html)
     if _DETECT_DIAGRAMS and text and _should_detect(text, layout_html):
-        dets, page_size = _detect_diagrams(b64_image, page_num)
-        text, layout_html = _merge_diagram_boxes(
-            text, layout_html, dets, page_size)
+        with _timed(page_num, "diagram detection"):
+            dets, page_size = _detect_diagrams(b64_image, page_num)
+            text, layout_html = _merge_diagram_boxes(
+                text, layout_html, dets, page_size)
     # Dedicated CBC fishbone (Hb/TC/DC/Plt cross) pass: the combined
     # read flattens this 2D diagram's layout into scattered raw numbers
     # (confirmed unreliable via prompt-only fix alone) — this focused
     # call reads it directly from the image and adds labeled lines
     # beside the untouched raw transcription.
     if text and _page_has_handwriting(text, layout_html):
-        fishbone = _detect_cbc_fishbone(b64_image, page_num)
-        text, layout_html = _merge_cbc_fishbone(
-            page_num, text, layout_html, fishbone)
+        with _timed(page_num, "cbc fishbone"):
+            fishbone = _detect_cbc_fishbone(b64_image, page_num)
+            text, layout_html = _merge_cbc_fishbone(
+                page_num, text, layout_html, fishbone)
     # Strip any hallucinated "Table 1" caption before table enforcement,
     # so it can't get swept up as part of a spliced-in table's anchor.
     text, layout_html = _strip_table_captions(text, layout_html)
@@ -4051,8 +4077,9 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
             or _handwriting_fraction(text, layout_html)
             >= _AUDIT_MIN_HW_FRACTION
             or spell_candidates):
-        text, layout_html = _audit_words(
-            b64_image, page_num, text, layout_html, spell_candidates)
+        with _timed(page_num, "audit"):
+            text, layout_html = _audit_words(
+                b64_image, page_num, text, layout_html, spell_candidates)
     text = _fix_shorthand(text)
     layout_html = _fix_shorthand_html(layout_html)
     # Remove any duplicate "Circle (If) Positive" checklist occurrence
@@ -4073,6 +4100,8 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     text, layout_html = _strip_printed_word_uncertainty(text, layout_html)
     if layout_html:
         layout_html = _wrap_uncertain(layout_html)
+    print(f"[TIMING] Page {page_num} TOTAL = "
+          f"{time.monotonic() - _page_t0:.1f}s")
     return text, layout_html, layout_error, b64_image
 
 
@@ -4084,6 +4113,7 @@ def extract(data: bytes, ext: str) -> tuple:
     Transcript failure raises ExtractorError (document fails, as before);
     layout/fields failures degrade to per-panel error strings only.
     """
+    _doc_t0 = time.monotonic()
     if ext == ".pdf":
         rendered = [(n, b64, "image/jpeg") for n, b64 in _render_pdf_pages(data)]
     else:
@@ -4111,7 +4141,8 @@ def extract(data: bytes, ext: str) -> tuple:
             n: pool.submit(_read_page_full, b64, n, mime)
             for n, b64, mime in rendered
         }
-        fields_fut = pool.submit(read_structured_fields, rendered)
+        _fields_t0 = time.monotonic()  # submitted here — timing must span
+        fields_fut = pool.submit(read_structured_fields, rendered)  # from here,
 
         pages = []
         for n, b64, _ in rendered:
@@ -4131,7 +4162,11 @@ def extract(data: bytes, ext: str) -> tuple:
                 "layout_html": layout_html,
                 "layout_error": layout_error,
             })
+        # not from when we start waiting below — timing THAT would only
+        # show leftover wait time if fields finished before the pages did.
         fields_data, fields_error = fields_fut.result()
+        print(f"[TIMING] Page ALL: structured fields (document-level) = "
+              f"{time.monotonic() - _fields_t0:.1f}s")
 
     extras = {
         "fields": fields_data.get("fields", []),
@@ -4139,5 +4174,7 @@ def extract(data: bytes, ext: str) -> tuple:
         "fields_error": fields_error,
     }
     meta = {"engine": ENGINE_NAME, "source": "ollama-vision", "deployment": _MODEL}
+    print(f"[TIMING] Document TOTAL ({len(rendered)} page(s)) = "
+          f"{time.monotonic() - _doc_t0:.1f}s")
     return pages, extras, meta
 
