@@ -107,6 +107,48 @@ IF NOT EXISTS (
       AND object_id = OBJECT_ID('{s}.raw_extractions')
 )
 CREATE INDEX idx_raw_extractions_hash ON {s}.raw_extractions (doc_hash);
+
+IF OBJECT_ID('{s}.corrected_pages', 'U') IS NULL
+CREATE TABLE {s}.corrected_pages (
+    id                     INT IDENTITY(1,1) PRIMARY KEY,
+    doc_hash               NVARCHAR(64) NOT NULL,
+    page_number            INT NOT NULL DEFAULT 1,
+    corrected_text         NVARCHAR(MAX),
+    corrected_layout_html  NVARCHAR(MAX),
+    created_at             DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT uq_corrected_pages_hash_page UNIQUE (doc_hash, page_number)
+);
+
+IF OBJECT_ID('{s}.page_images', 'U') IS NULL
+CREATE TABLE {s}.page_images (
+    id           INT IDENTITY(1,1) PRIMARY KEY,
+    doc_hash     NVARCHAR(64) NOT NULL,
+    page_number  INT NOT NULL DEFAULT 1,
+    image_b64    NVARCHAR(MAX) NOT NULL,
+    created_at   DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT uq_page_images_hash_page UNIQUE (doc_hash, page_number)
+);
+
+IF OBJECT_ID('{s}.corrected_words', 'U') IS NULL
+CREATE TABLE {s}.corrected_words (
+    id                INT IDENTITY(1,1) PRIMARY KEY,
+    doc_hash          NVARCHAR(64) NOT NULL,
+    filename          NVARCHAR(400),
+    page_number       INT NOT NULL DEFAULT 1,
+    predicted_word    NVARCHAR({_VALUE_MAX_CHARS}) NOT NULL,
+    corrected_word    NVARCHAR({_VALUE_MAX_CHARS}) NOT NULL,
+    sentence_context  NVARCHAR(1000) NOT NULL,
+    crop_b64          NVARCHAR(MAX),
+    crop_bbox         NVARCHAR(100),
+    created_at        DATETIMEOFFSET NOT NULL DEFAULT SYSDATETIMEOFFSET()
+);
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'idx_corrected_words_hash'
+      AND object_id = OBJECT_ID('{s}.corrected_words')
+)
+CREATE INDEX idx_corrected_words_hash ON {s}.corrected_words (doc_hash);
 """
     conn = _connect()
     try:
@@ -537,6 +579,180 @@ def save_raw_correction(doc_hash: str, filename: str, original_text: str, correc
     return pairs, learned
 
 
+def save_corrected_page(doc_hash: str, page_number: int, corrected_text: str,
+                        corrected_layout_html: str) -> None:
+    """
+    Persist the EXACT corrected text/layout HTML for one page, as sent by
+    the editor at save time — not re-derived by fuzzy patching. This is
+    what makes re-upload replay exact (see get_corrected_pages) instead
+    of the best-effort anchor-matched patch used elsewhere. Raises on DB
+    error (caller should treat this as non-fatal to the main save).
+    """
+    s = _schema()
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""UPDATE {s}.corrected_pages
+                    SET corrected_text = %s,
+                        corrected_layout_html = %s,
+                        created_at = SYSDATETIMEOFFSET()
+                    WHERE doc_hash = %s AND page_number = %s""",
+                (corrected_text, corrected_layout_html, doc_hash, page_number),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    f"""INSERT INTO {s}.corrected_pages
+                        (doc_hash, page_number, corrected_text, corrected_layout_html)
+                        VALUES (%s, %s, %s, %s)""",
+                    (doc_hash, page_number, corrected_text, corrected_layout_html),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_corrected_pages(doc_hash: str) -> list:
+    """
+    [{"page": int, "text": str, "layout_html": str}, ...] for every page of
+    this document that has an exact stored correction (may be a subset of
+    the document's pages). [] if none. Raises on DB error.
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT page_number, corrected_text, corrected_layout_html
+                    FROM {_schema()}.corrected_pages
+                    WHERE doc_hash = %s
+                    ORDER BY page_number""",
+                (doc_hash,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [{"page": r[0], "text": r[1], "layout_html": r[2]} for r in rows]
+
+
+def save_page_images(doc_hash: str, filename: str, images: list) -> None:
+    """
+    Persist each page's already-rendered image (the same JPEG the model
+    read), so a correction made later can still be cropped without
+    re-uploading/re-rendering. images: [(page_number, b64_jpeg), ...].
+    Never raises — failures are logged so they cannot break extraction.
+    """
+    if not images:
+        return
+    s = _schema()
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            for page_number, b64 in images:
+                cur.execute(
+                    f"""UPDATE {s}.page_images
+                        SET image_b64 = %s, created_at = SYSDATETIMEOFFSET()
+                        WHERE doc_hash = %s AND page_number = %s""",
+                    (b64, doc_hash, page_number),
+                )
+                if cur.rowcount == 0:
+                    cur.execute(
+                        f"""INSERT INTO {s}.page_images
+                            (doc_hash, page_number, image_b64)
+                            VALUES (%s, %s, %s)""",
+                        (doc_hash, page_number, b64),
+                    )
+        conn.commit()
+    except Exception as e:
+        print(f"[WARNING] save_page_images DB error: {e}")
+    finally:
+        conn.close()
+
+
+def get_page_image(doc_hash: str, page_number: int):
+    """The stored base64 page image, or None if not found. Raises on DB error."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT image_b64 FROM {_schema()}.page_images
+                    WHERE doc_hash = %s AND page_number = %s""",
+                (doc_hash, page_number),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def _line_containing_token(text: str, token_idx: int) -> str:
+    """
+    The full (stripped) line of `text` containing the token_idx'th
+    whitespace-split token (0-based) — used to capture a corrected
+    word's surrounding sentence for training-data context.
+    """
+    count = 0
+    for line in text.splitlines():
+        n = len(line.split())
+        if count <= token_idx < count + n:
+            return line.strip()
+        count += n
+    return ""
+
+
+def word_diffs_with_sentence(original: str, corrected: str) -> list:
+    """
+    Same word-level diff as _word_diffs, but each triple gains a 4th
+    field: the full corrected-text line the change sits in. Kept
+    separate from _word_diffs (rather than changing its return shape)
+    since _word_diffs' 3-tuple contract is relied on elsewhere (layout
+    patch replay) and training-data capture is the only caller that
+    needs sentence context. Public (no leading underscore) since
+    backend.py calls it directly to orchestrate word-crop capture.
+    """
+    a, b = original.split(), corrected.split()
+    quads = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b).get_opcodes():
+        if op != "replace":
+            continue
+        if (i2 - i1) > _MAX_DIFF_TOKENS or (j2 - j1) > _MAX_DIFF_TOKENS:
+            continue
+        pred, corr = " ".join(a[i1:i2]), " ".join(b[j1:j2])
+        if not pred or not corr or pred == corr:
+            continue
+        sentence = _line_containing_token(corrected, j1)
+        quads.append((pred, corr, sentence))
+    return quads
+
+
+def save_corrected_word(doc_hash: str, filename: str, page_number: int,
+                        predicted_word: str, corrected_word: str,
+                        sentence_context: str, crop_b64, crop_bbox) -> None:
+    """
+    One training-data row: a corrected word, its sentence context, and
+    (when the locate/crop step succeeded) an image crop of exactly where
+    it sits on the source page. Never raises — failures are logged so
+    they cannot break the correction-save flow that triggers this.
+    """
+    s = _schema()
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {s}.corrected_words
+                    (doc_hash, filename, page_number, predicted_word,
+                     corrected_word, sentence_context, crop_b64, crop_bbox)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (doc_hash, filename or None, page_number,
+                 _clip(predicted_word), _clip(corrected_word),
+                 (sentence_context or "")[:1000], crop_b64, crop_bbox),
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"[WARNING] save_corrected_word DB error: {e}")
+    finally:
+        conn.close()
+
+
 def get_raw_correction_pairs(doc_hash: str) -> list:
     """
     (predicted, corrected, anchor) word triples recomputed from the stored
@@ -591,7 +807,9 @@ def get_raw_correction(doc_hash: str):
 def delete_raw_correction(doc_hash: str) -> tuple:
     """
     Remove a stored raw-text correction and the spelling pairs mined from it,
-    restoring the document to un-corrected behaviour on re-upload.
+    restoring the document to un-corrected behaviour on re-upload. Also
+    clears corrected_pages — otherwise the re-upload short-circuit in
+    backend.py would keep serving the now-reverted correction from cache.
     Returns (found, original_text) — original_text may be None for rows saved
     before it was recorded. Raises on DB error.
     """
@@ -612,6 +830,10 @@ def delete_raw_correction(doc_hash: str) -> tuple:
             )
             cur.execute(
                 f"DELETE FROM {s}.corrections WHERE doc_hash = %s AND kind IN ('spelling', 'ambiguity')",
+                (doc_hash,),
+            )
+            cur.execute(
+                f"DELETE FROM {s}.corrected_pages WHERE doc_hash = %s",
                 (doc_hash,),
             )
         conn.commit()

@@ -11,6 +11,7 @@ Run (port 8002 — GPT sibling uses 8001, Azure sibling uses 8003):
 
 import asyncio
 import hashlib
+import os
 import re
 import traceback
 import uuid
@@ -48,6 +49,14 @@ app.add_middleware(
 # Jobs are keyed by a UUID returned to the client on upload.
 # Status: "queued" | "running" | "done" | "error"
 _jobs: Dict[str, dict] = {}
+
+# Re-upload of a document with a stored human correction serves that exact
+# corrected result instead of re-running the (slow) model extraction. Set
+# REUSE_CORRECTED_RESULT=0 to always re-extract fresh, ignoring any stored
+# correction for reuse purposes (a saved correction is still recorded
+# either way — this only gates whether it's replayed instead of re-run).
+_REUSE_CORRECTED_RESULT = os.getenv(
+    "REUSE_CORRECTED_RESULT", "1").strip().lower() not in ("0", "false", "off")
 
 
 @app.exception_handler(Exception)
@@ -184,16 +193,68 @@ async def _run_extraction(job_id: str, data: bytes, ext: str, filename: str):
     _jobs[job_id]["status"] = "running"
     try:
         doc_hash = hashlib.sha256(data).hexdigest()
-        pages, extras, meta = await asyncio.to_thread(extractor.extract, data, ext)
 
-        # ── Persist raw model output immediately ──────────────────
-        try:
-            await asyncio.to_thread(
-                feedback_store.save_raw_extraction, doc_hash, filename, pages
-            )
-            print(f"[INFO] Raw extraction saved for {filename} ({doc_hash[:12]}…)")
-        except Exception as e:
-            print(f"[WARNING] Could not save raw extraction (DB unavailable?): {e}")
+        # ── Reuse a stored correction instead of re-extracting ─────
+        # raw_extractions already has a row per page for every document
+        # ever seen (saved automatically below); overlay any page that
+        # also has an EXACT stored correction (corrected_pages) on top
+        # of it. This reconstructs the full document from cache — pages
+        # never corrected fall back to their last raw extraction, so a
+        # partial correction (e.g. only page 2 of 5) still short-circuits
+        # the whole document rather than requiring every page be fixed.
+        pages = extras = meta = None
+        if _REUSE_CORRECTED_RESULT:
+            try:
+                base_pages = await asyncio.to_thread(
+                    feedback_store.get_raw_extraction, doc_hash)
+                corrections_by_page = {}
+                if base_pages:
+                    corrections_by_page = {
+                        p["page"]: p for p in await asyncio.to_thread(
+                            feedback_store.get_corrected_pages, doc_hash)
+                    }
+                if corrections_by_page:
+                    pages = [
+                        {
+                            "page": bp["page"],
+                            "text": corrections_by_page[bp["page"]]["text"]
+                                if bp["page"] in corrections_by_page else bp["text"],
+                            "layout_html": corrections_by_page[bp["page"]]["layout_html"]
+                                if bp["page"] in corrections_by_page else bp["layout_html"],
+                            "layout_error": bp["layout_error"],
+                        }
+                        for bp in base_pages
+                    ]
+                    extras, meta = {}, {
+                        "engine": extractor.ENGINE_NAME,
+                        "reused_correction": True,
+                    }
+                    print(f"[INFO] Reusing stored corrected result for "
+                          f"{filename} ({doc_hash[:12]}…) — extraction skipped "
+                          f"({len(corrections_by_page)}/{len(base_pages)} page(s) corrected)")
+            except Exception as e:
+                print(f"[WARNING] Corrected-result reuse lookup skipped: {e}")
+
+        if pages is None:
+            pages, extras, meta = await asyncio.to_thread(extractor.extract, data, ext)
+            page_images = extras.pop("page_images", [])
+
+            # ── Persist raw model output immediately ──────────────
+            try:
+                await asyncio.to_thread(
+                    feedback_store.save_raw_extraction, doc_hash, filename, pages
+                )
+                print(f"[INFO] Raw extraction saved for {filename} ({doc_hash[:12]}…)")
+            except Exception as e:
+                print(f"[WARNING] Could not save raw extraction (DB unavailable?): {e}")
+
+            # ── Persist page images (for later correction crops) ──
+            try:
+                await asyncio.to_thread(
+                    feedback_store.save_page_images, doc_hash, filename, page_images
+                )
+            except Exception as e:
+                print(f"[WARNING] Could not save page images (DB unavailable?): {e}")
 
         if len(pages) == 1:
             raw_text = pages[0]["text"]
@@ -337,10 +398,59 @@ class RawFeedbackPayload(BaseModel):
     filename: Optional[str] = None
     original_text: str = ""
     corrected_text: str = ""
+    # Optional: this ONE page's own text/layout, as edited — lets the save
+    # also (a) persist an exact per-page replay (corrected_pages, see
+    # _run_extraction's reuse path) and (b) capture word-level training
+    # samples with a source-image crop for the specific page they occurred on.
+    page_number: Optional[int] = None
+    page_original_text: str = ""
+    page_corrected_text: str = ""
+    page_layout_html: str = ""
+
+
+async def _capture_corrected_word_crops(doc_hash: str, filename: str, page_number: int,
+                                        original_text: str, corrected_text: str):
+    """
+    Background task (fired after a correction save already returned):
+    for each word changed on this page, locate it on the stored page
+    image and crop around it, then save one corrected_words training row
+    per change. Never raises — runs after the response is already sent.
+    """
+    try:
+        triples = await asyncio.to_thread(
+            feedback_store.word_diffs_with_sentence, original_text, corrected_text)
+    except Exception as e:
+        print(f"[WARNING] Word-diff for training capture failed: {e}")
+        return
+    if not triples:
+        return
+    try:
+        image_b64 = await asyncio.to_thread(
+            feedback_store.get_page_image, doc_hash, page_number)
+    except Exception as e:
+        print(f"[WARNING] Page-image lookup for training capture failed: {e}")
+        image_b64 = None
+    for predicted, corrected, sentence in triples:
+        crop_b64 = crop_bbox = None
+        if image_b64:
+            try:
+                crop_b64, crop_bbox = await asyncio.to_thread(
+                    extractor.crop_corrected_word, image_b64, page_number,
+                    predicted, corrected, sentence)
+            except Exception as e:
+                print(f"[WARNING] Word crop failed for '{predicted}'->'{corrected}': {e}")
+        try:
+            await asyncio.to_thread(
+                feedback_store.save_corrected_word, doc_hash, filename,
+                page_number, predicted, corrected, sentence, crop_b64, crop_bbox)
+        except Exception as e:
+            print(f"[WARNING] save_corrected_word failed: {e}")
+    print(f"[INFO] Training-data capture: {len(triples)} corrected word(s) "
+          f"for {filename} page {page_number} ({doc_hash[:12]}…)")
 
 
 @app.post("/api/raw-feedback")
-def save_raw_feedback(payload: RawFeedbackPayload):
+async def save_raw_feedback(payload: RawFeedbackPayload):
     """
     Persist a human-corrected raw transcription. The exact same file
     (matched by content hash) will show this text on re-upload, and word
@@ -353,7 +463,8 @@ def save_raw_feedback(payload: RawFeedbackPayload):
     if payload.corrected_text == payload.original_text:
         raise HTTPException(status_code=400, detail="Text is unchanged — nothing to save.")
     try:
-        pairs, learned = feedback_store.save_raw_correction(
+        pairs, learned = await asyncio.to_thread(
+            feedback_store.save_raw_correction,
             payload.doc_hash,
             payload.filename or "",
             payload.original_text,
@@ -364,6 +475,22 @@ def save_raw_feedback(payload: RawFeedbackPayload):
             status_code=503,
             detail=f"Could not save correction — is PostgreSQL running? ({e})",
         )
+
+    if payload.page_number is not None and payload.page_corrected_text.strip():
+        try:
+            await asyncio.to_thread(
+                feedback_store.save_corrected_page,
+                payload.doc_hash, payload.page_number,
+                payload.page_corrected_text, payload.page_layout_html,
+            )
+        except Exception as e:
+            print(f"[WARNING] Could not save corrected page (DB unavailable?): {e}")
+        if payload.page_original_text.strip():
+            asyncio.create_task(_capture_corrected_word_crops(
+                payload.doc_hash, payload.filename or "", payload.page_number,
+                payload.page_original_text, payload.page_corrected_text,
+            ))
+
     return {"saved": True, "spelling_pairs": len(learned), "pairs": pairs}
 
 
@@ -430,7 +557,6 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    import os
     # Bind to 0.0.0.0 so Jarvis Labs proxy can reach the server.
     # Use APP_HOST env var to override (127.0.0.1 for local, 0.0.0.0 for cloud).
     host = os.getenv("APP_HOST", "0.0.0.0")

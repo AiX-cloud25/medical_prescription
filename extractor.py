@@ -42,7 +42,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-23-r22"
+EXTRACTOR_BUILD = "2026-08-23-r23"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -2977,6 +2977,110 @@ def _verify_diagram_crop(img, box, page_num: int):
         return None
 
 
+# ── Corrected-word locate + crop (training-data capture) ─────────────
+# When a human corrects a word in the UI, backend.py asks for a crop of
+# exactly where that word sits on the source page image, to store
+# alongside the correction as a training sample. Same architecture as
+# _detect_diagrams/_verify_diagram_crop: a small dedicated grounding
+# call, then a percent-bbox crop through the same pipeline every other
+# crop in this file uses (_normalize_bbox -> pad -> clamp -> downscale
+# -> JPEG encode).
+_WORD_CROP_MAX_EDGE = int(os.getenv("WORD_CROP_MAX_EDGE", "300"))
+_WORD_CROP_PAD_PCT = float(os.getenv("WORD_CROP_PAD_PCT", "4.0"))
+
+_WORD_LOCATE_SYSTEM = (
+    "You look at ONE medical document page image and are given a target "
+    "WORD/PHRASE plus the full sentence it appears in (the sentence is "
+    "context to help you find the right occurrence — it may be printed "
+    "or handwritten). Find where that exact word/phrase is written on "
+    "the page and return its bounding box as page-relative percentages "
+    "(0-100), top-left origin. If the sentence appears more than once, "
+    "use the sentence wording to pick the right occurrence. If you "
+    "cannot confidently find it, return null.\n"
+    'Output ONLY JSON: {"x": <number>, "y": <number>, "w": <number>, '
+    '"h": <number>} or {"x": null}.'
+)
+_WORD_LOCATE_USER = (
+    'Sentence: "{sentence}"\nTarget word/phrase: "{word}"\n'
+    "Find its bounding box and return the JSON now."
+)
+
+
+def _crop_region(image_b64: str, box, pad_pct: float, max_edge: int):
+    """
+    Crop `box` (x, y, w, h in page percent) out of a base64-encoded page
+    image, pad/clamp/downscale/encode exactly like the other crop paths
+    in this file. Returns a base64 JPEG string, or None on any failure
+    (including a degenerate resulting crop). Never raises.
+    """
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(image_b64)))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        pw, ph = img.size
+        x, y, w, h = box
+        left = max(0, int((x - pad_pct) / 100 * pw))
+        top = max(0, int((y - pad_pct) / 100 * ph))
+        right = min(pw, int((x + w + pad_pct) / 100 * pw))
+        bottom = min(ph, int((y + h + pad_pct) / 100 * ph))
+        if right - left < 4 or bottom - top < 4:
+            return None
+        crop = img.crop((left, top, right, bottom))
+        scale = max_edge / max(crop.size)
+        if scale < 1:
+            crop = crop.resize((max(1, int(crop.size[0] * scale)),
+                                max(1, int(crop.size[1] * scale))))
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=80)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception as e:
+        print(f"[WARNING] word-crop region failed: {e}")
+        return None
+
+
+def _locate_word_in_page(image_b64: str, page_num, word: str, sentence: str):
+    """
+    Dedicated vision call asking where `word` sits on the page, using
+    `sentence` as disambiguating context. Returns a normalized (x, y, w,
+    h) percent box, or None (not found / low confidence / any failure).
+    Never raises.
+    """
+    try:
+        img = Image.open(io.BytesIO(base64.b64decode(image_b64)))
+        pw, ph = img.size
+        raw, _ = _ollama_chat(
+            _WORD_LOCATE_SYSTEM,
+            _WORD_LOCATE_USER.format(sentence=sentence, word=word),
+            [image_b64], 120, json_mode=True)
+        parsed = _parse_json_loose(raw) if raw else {}
+        if not isinstance(parsed, dict) or parsed.get("x") is None:
+            return None
+        x, y, w, h = (float(parsed.get(k, 0) or 0) for k in ("x", "y", "w", "h"))
+        return _normalize_bbox(x, y, w, h, pw, ph)
+    except Exception as e:
+        print(f"[WARNING] Page {page_num}: word locate failed ({e})")
+        return None
+
+
+def crop_corrected_word(image_b64: str, page_num, predicted_word: str,
+                        corrected_word: str, sentence: str) -> tuple:
+    """
+    Locate `corrected_word` (falling back to `predicted_word` if the
+    corrected form isn't found — e.g. a filled-in blank won't appear in
+    the source image under its corrected spelling) on the page image and
+    crop around it. Returns (crop_b64 | None, "x,y,w,h" | None). Never
+    raises — a locate/crop failure just means no image for this sample.
+    """
+    box = _locate_word_in_page(image_b64, page_num, corrected_word, sentence)
+    if box is None and corrected_word != predicted_word:
+        box = _locate_word_in_page(image_b64, page_num, predicted_word, sentence)
+    if box is None:
+        return None, None
+    crop_b64 = _crop_region(image_b64, box, _WORD_CROP_PAD_PCT, _WORD_CROP_MAX_EDGE)
+    bbox_str = ",".join(f"{v:.2f}" for v in box) if crop_b64 else None
+    return crop_b64, bbox_str
+
+
 def _esc_attr(s: str) -> str:
     """Make a model-supplied description safe inside an alt attribute."""
     return re.sub(r'["<>\[\]]', "", s or "").strip()[:80]
@@ -4125,7 +4229,8 @@ def extract(data: bytes, ext: str) -> tuple:
     """
     Extract from an uploaded prescription. Returns (pages, extras, meta):
         pages  : [{"page", "text", "layout_html", "layout_error"}, ...]
-        extras : {"fields": [...], "medicines": [...], "fields_error": str|None}
+        extras : {"fields": [...], "medicines": [...], "fields_error": str|None,
+                  "page_images": [(page_num, b64), ...]}  # backend-internal only
     Transcript failure raises ExtractorError (document fails, as before);
     layout/fields failures degrade to per-panel error strings only.
     """
@@ -4161,6 +4266,7 @@ def extract(data: bytes, ext: str) -> tuple:
         fields_fut = pool.submit(read_structured_fields, rendered)  # from here,
 
         pages = []
+        page_images = []
         for n, b64, _ in rendered:
             # ExtractorError propagates. effective_b64 is the image every
             # bbox refers to — it differs from b64 only when the sparse-
@@ -4178,6 +4284,10 @@ def extract(data: bytes, ext: str) -> tuple:
                 "layout_html": layout_html,
                 "layout_error": layout_error,
             })
+            # Retained so a later human correction can be cropped from the
+            # exact image the model read (see crop_corrected_word) — the
+            # page image is otherwise discarded after this function returns.
+            page_images.append((n, effective_b64))
         # not from when we start waiting below — timing THAT would only
         # show leftover wait time if fields finished before the pages did.
         fields_data, fields_error = fields_fut.result()
@@ -4188,6 +4298,9 @@ def extract(data: bytes, ext: str) -> tuple:
         "fields": fields_data.get("fields", []),
         "medicines": fields_data.get("medicines", []),
         "fields_error": fields_error,
+        # Not part of the API response — backend.py pops this before
+        # returning `extras` to the client, and persists it separately.
+        "page_images": page_images,
     }
     meta = {"engine": ENGINE_NAME, "source": "ollama-vision", "deployment": _MODEL}
     print(f"[TIMING] Document TOTAL ({len(rendered)} page(s)) = "

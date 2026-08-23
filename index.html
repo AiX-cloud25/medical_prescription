@@ -1055,6 +1055,13 @@
               filename: file.name,
               original_text: rawText,
               corrected_text: newDocText,
+              // This page's own before/after — lets the server persist an
+              // exact per-page replay and capture word-level training
+              // samples (with a source-image crop) for this page.
+              page_number: page.page,
+              page_original_text: page.text || "",
+              page_corrected_text: newPageText,
+              page_layout_html: editedHtml,
             }),
           });
           const body = await res.json().catch(() => ({}));
