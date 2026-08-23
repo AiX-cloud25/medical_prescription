@@ -49,4 +49,4 @@ if [ -f ".venv/bin/activate" ]; then
 fi
 
 echo "Starting backend via run.sh..."
-exec ./run.sh
+exec bash ./run.sh
