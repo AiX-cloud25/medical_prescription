@@ -43,7 +43,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-24-r28"
+EXTRACTOR_BUILD = "2026-08-24-r29"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -4212,6 +4212,8 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     MUST be the image crops are cut from.
     """
     _page_t0 = time.monotonic()
+    _page_start_wall = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[TIMING] Page {page_num} START = {_page_start_wall}")
     with _timed(page_num, "main read"):
         text, layout_html, layout_error, quality_flags = read_page(
             b64_image, page_num, mime)
@@ -4306,8 +4308,9 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     text, layout_html = _strip_printed_word_uncertainty(text, layout_html)
     if layout_html:
         layout_html = _wrap_uncertain(layout_html)
-    print(f"[TIMING] Page {page_num} TOTAL = "
-          f"{time.monotonic() - _page_t0:.1f}s")
+    _page_end_wall = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[TIMING] Page {page_num} DONE: start={_page_start_wall} "
+          f"end={_page_end_wall} total={time.monotonic() - _page_t0:.1f}s")
     return text, layout_html, layout_error, b64_image
 
 
