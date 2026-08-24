@@ -42,7 +42,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-23-r23"
+EXTRACTOR_BUILD = "2026-08-24-r27"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -51,8 +51,18 @@ print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
 _RENDER_DPI = 300
 _SCALE = _RENDER_DPI / 72
 
-# Output budget for the text-only transcription / structured-fields calls.
+# Output budget for the text-only transcription / sparse-page-rescue
+# calls — these only ever attach ONE image, so they have plenty of
+# context-window headroom already.
 _VISION_MAX_TOKENS = 20000
+
+# Output budget for the structured-fields call specifically. Kept
+# separate from _VISION_MAX_TOKENS because this call attaches up to
+# FIELDS_MAX_PAGES (4) images at once — several times the input-token
+# cost of the single-image calls above — so it needs its own, larger
+# budget to have real headroom within OLLAMA_NUM_CTX (32768) rather than
+# sharing a cap sized for a single-image call.
+_FIELDS_MAX_TOKENS = int(os.getenv("FIELDS_MAX_TOKENS", "28000"))
 
 _MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
@@ -2022,7 +2032,56 @@ def read_page(
 # "Fields read error: ... no parseable JSON object" — that error means
 # the model's JSON response got cut off before closing, which happens
 # under context/generation pressure from too many images in one call.
-_FIELDS_MAX_PAGES = int(os.getenv("FIELDS_MAX_PAGES", "4"))
+_FIELDS_MAX_PAGES = int(os.getenv("FIELDS_MAX_PAGES", "2"))
+
+
+def _salvage_json_array(text: str, key: str) -> list:
+    """
+    Recover as many COMPLETE JSON objects as possible from a `"key": [...]`
+    array inside `text`, even when the array (or its enclosing object)
+    never closes because generation hit the token cap mid-response.
+    Everything the model generated before the cutoff is still real,
+    already-paid-for data — discarding it just because the response as a
+    whole isn't valid JSON throws away work that's actually usable.
+    Tracks string state so braces inside a field's own text value never
+    confuse the depth count. Returns [] if `key` isn't found or nothing
+    complete could be recovered (e.g. cut off mid-object). Never raises.
+    """
+    m = re.search(r'"' + re.escape(key) + r'"\s*:\s*\[', text)
+    if not m:
+        return []
+    items = []
+    depth = 0
+    item_start = None
+    in_string = False
+    escape = False
+    for j in range(m.end(), len(text)):
+        ch = text[j]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                item_start = j
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and item_start is not None:
+                try:
+                    items.append(json.loads(text[item_start:j + 1]))
+                except Exception:
+                    pass
+                item_start = None
+        elif ch == "]" and depth == 0:
+            break
+    return items
 
 
 def _fields_single_call(system_prompt: str, images: list) -> tuple:
@@ -2040,7 +2099,7 @@ def _fields_single_call(system_prompt: str, images: list) -> tuple:
                 system_prompt,
                 fields_user,
                 images_b64,
-                _VISION_MAX_TOKENS,
+                _FIELDS_MAX_TOKENS,
                 json_mode=True,
             )
             if not raw:
@@ -2054,11 +2113,25 @@ def _fields_single_call(system_prompt: str, images: list) -> tuple:
             except Exception as e:
                 # done_reason == "length" means num_predict was hit before
                 # the model finished — the JSON is genuinely truncated, not
-                # malformed. Surface that distinction so a repeat of this
-                # warning is diagnosable without re-running the call.
+                # malformed. Retrying identically rarely helps here (at
+                # temperature 0 the model tends to reproduce a similarly
+                # long response and hit the same wall again) — salvage
+                # whatever complete field/medicine objects were already
+                # generated before the cutoff instead of discarding them.
                 if reason == "length":
+                    salvaged_fields = _salvage_json_array(raw, "fields")
+                    salvaged_medicines = _salvage_json_array(raw, "medicines")
+                    if salvaged_fields or salvaged_medicines:
+                        print(f"[WARNING] Fields read truncated at the "
+                              f"{_FIELDS_MAX_TOKENS}-token cap — salvaged "
+                              f"{len(salvaged_fields)} field(s) and "
+                              f"{len(salvaged_medicines)} medicine(s) from "
+                              f"the incomplete response instead of "
+                              f"discarding it, attempt {attempt + 1}/4")
+                        return {"fields": salvaged_fields,
+                                "medicines": salvaged_medicines}, None
                     raise ValueError(
-                        f"response truncated at the {_VISION_MAX_TOKENS}-token "
+                        f"response truncated at the {_FIELDS_MAX_TOKENS}-token "
                         f"output cap before the JSON closed ({e})") from e
                 raise
             fields = parsed.get("fields") or []
@@ -2078,10 +2151,12 @@ def read_structured_fields(images: list) -> tuple:
     """
     Structured extraction for the whole document:
     images = [(page_num, b64, mime), ...].
-    Documents longer than _FIELDS_MAX_PAGES are processed in page chunks
-    and the chunk results merged (fields deduped by key, medicines by name)
-    so every page contributes. Returns ({"fields": [...], "medicines": [...]},
-    error|None) — never raises.
+    Documents longer than _FIELDS_MAX_PAGES are processed in page chunks,
+    run CONCURRENTLY (independent chunks, no reason to serialize them —
+    Ollama's own concurrency setting still governs actual GPU scheduling),
+    and the chunk results merged (fields deduped by key, medicines by
+    name) so every page contributes. Returns ({"fields": [...],
+    "medicines": [...]}, error|None) — never raises.
     """
     try:
         _check_ollama()
@@ -2099,10 +2174,20 @@ def read_structured_fields(images: list) -> tuple:
     except Exception as e:
         print(f"[WARNING] Corrections lookup skipped (Postgres unavailable?): {e}")
 
+    chunks = [images[start:start + _FIELDS_MAX_PAGES]
+              for start in range(0, len(images), _FIELDS_MAX_PAGES)]
+    # Chunks are independent (each just covers a different set of pages),
+    # so there is no reason to run them one after another — a lower
+    # FIELDS_MAX_PAGES means more, smaller chunks, and running them
+    # concurrently is what keeps that from costing more wall-clock time.
+    # Ollama's own OLLAMA_NUM_PARALLEL still governs true GPU concurrency
+    # regardless of how many requests arrive at once from this pool.
+    with ThreadPoolExecutor(max_workers=min(4, len(chunks) or 1)) as pool:
+        results = list(pool.map(
+            lambda chunk: _fields_single_call(system_prompt, chunk), chunks))
+
     all_fields, all_medicines, errors = [], [], []
-    for start in range(0, len(images), _FIELDS_MAX_PAGES):
-        chunk = images[start:start + _FIELDS_MAX_PAGES]
-        data, err = _fields_single_call(system_prompt, chunk)
+    for data, err in results:
         if err:
             errors.append(err)
             continue
@@ -4231,8 +4316,13 @@ def extract(data: bytes, ext: str) -> tuple:
         pages  : [{"page", "text", "layout_html", "layout_error"}, ...]
         extras : {"fields": [...], "medicines": [...], "fields_error": str|None,
                   "page_images": [(page_num, b64), ...]}  # backend-internal only
-    Transcript failure raises ExtractorError (document fails, as before);
-    layout/fields failures degrade to per-panel error strings only.
+    A single page's total failure degrades that page to an error
+    placeholder (its "layout_error" explains why) rather than failing the
+    whole document — important on long documents, where one late-queued
+    page is the most likely to fail under GPU contention and must not
+    discard every other already-succeeded page. ExtractorError is raised
+    only if EVERY page failed. layout/fields failures degrade to
+    per-panel error strings only, as before.
     """
     _doc_t0 = time.monotonic()
     if ext == ".pdf":
@@ -4267,12 +4357,34 @@ def extract(data: bytes, ext: str) -> tuple:
 
         pages = []
         page_images = []
+        page_failures = []
         for n, b64, _ in rendered:
-            # ExtractorError propagates. effective_b64 is the image every
-            # bbox refers to — it differs from b64 only when the sparse-
-            # page rescue rotated the page, and crops MUST be cut from it.
-            text, layout_html, layout_error, effective_b64 = \
-                page_futs[n].result()
+            # A single page's TOTAL failure (every retry exhausted — e.g.
+            # a call timing out under heavy multi-page GPU contention on a
+            # long document) must not take down an otherwise-successful
+            # multi-page document: confirmed real-world case was a 23-page
+            # document that failed entirely because one late-queued page's
+            # call failed, discarding 22 already-finished pages. Degrade
+            # that one page to an error placeholder instead; only raise
+            # below if EVERY page failed.
+            try:
+                # effective_b64 is the image every bbox refers to — it
+                # differs from b64 only when the sparse-page rescue
+                # rotated the page, and crops MUST be cut from it.
+                text, layout_html, layout_error, effective_b64 = \
+                    page_futs[n].result()
+            except Exception as e:
+                print(f"[ERROR] Page {n}: failed entirely, degrading to an "
+                      f"error placeholder instead of failing the whole "
+                      f"document ({e})")
+                page_failures.append(n)
+                pages.append({
+                    "page": n,
+                    "text": "",
+                    "layout_html": None,
+                    "layout_error": f"This page could not be extracted: {e}",
+                })
+                continue
             if layout_html:
                 # Cut the real drawings out of the page image and embed
                 # them where the detector/model marked data-bbox.
@@ -4288,6 +4400,15 @@ def extract(data: bytes, ext: str) -> tuple:
             # exact image the model read (see crop_corrected_word) — the
             # page image is otherwise discarded after this function returns.
             page_images.append((n, effective_b64))
+
+        if page_failures and len(page_failures) == len(rendered):
+            raise ExtractorError(
+                f"All {len(rendered)} page(s) failed to extract "
+                f"(last failure was page {page_failures[-1]}).")
+        if page_failures:
+            print(f"[WARNING] Document had {len(page_failures)}/"
+                  f"{len(rendered)} page(s) fail: {page_failures} — "
+                  f"remaining pages returned normally.")
         # not from when we start waiting below — timing THAT would only
         # show leftover wait time if fields finished before the pages did.
         fields_data, fields_error = fields_fut.result()

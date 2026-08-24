@@ -15,6 +15,16 @@ export OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:--1}
 
 echo "Ollama tuning: NUM_PARALLEL=${OLLAMA_NUM_PARALLEL} KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE} KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}"
 
+# FIELDS_MAX_PAGES/FIELDS_MAX_TOKENS are Python-side settings loaded from
+# .env by backend.py (load_dotenv(..., override=True)) — .env always wins
+# over anything exported here, unlike the OLLAMA_* vars above. Just echo
+# them for visibility at startup; to change them, edit .env directly.
+if [ -f ".env" ]; then
+    _fields_pages=$(grep -E "^FIELDS_MAX_PAGES=" .env | tail -1 | cut -d= -f2)
+    _fields_tokens=$(grep -E "^FIELDS_MAX_TOKENS=" .env | tail -1 | cut -d= -f2)
+    echo "Fields-call tuning (from .env — edit .env to change): FIELDS_MAX_PAGES=${_fields_pages:-unset} FIELDS_MAX_TOKENS=${_fields_tokens:-unset}"
+fi
+
 if ! command -v ollama >/dev/null 2>&1; then
     echo "Ollama not found, installing..."
     curl -fsSL https://ollama.com/install.sh | sh
