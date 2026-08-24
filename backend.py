@@ -236,7 +236,7 @@ async def _run_extraction(job_id: str, data: bytes, ext: str, filename: str):
                 print(f"[WARNING] Corrected-result reuse lookup skipped: {e}")
 
         if pages is None:
-            pages, extras, meta = await asyncio.to_thread(extractor.extract, data, ext)
+            pages, extras, meta = await asyncio.to_thread(extractor.extract, data, ext, filename)
             page_images = extras.pop("page_images", [])
 
             # ── Persist raw model output immediately ──────────────

@@ -20,6 +20,7 @@ Public API:
 
 import base64
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -42,7 +43,7 @@ ENGINE_NAME = f"Offline VLM via Ollama ({_MODEL})"
 # Bumped on every behavioral change; printed at import so the server log
 # proves which build is actually running (deployments happen by git pull
 # on a remote box — a stale checkout is otherwise invisible).
-EXTRACTOR_BUILD = "2026-08-24-r27"
+EXTRACTOR_BUILD = "2026-08-24-r28"
 print(f"[INFO] extractor build {EXTRACTOR_BUILD} — model={_MODEL}, "
       f"host={_HOST}")
 
@@ -4310,7 +4311,7 @@ def _read_page_full(b64_image: str, page_num: int, mime: str) -> tuple:
     return text, layout_html, layout_error, b64_image
 
 
-def extract(data: bytes, ext: str) -> tuple:
+def extract(data: bytes, ext: str, filename: str = None) -> tuple:
     """
     Extract from an uploaded prescription. Returns (pages, extras, meta):
         pages  : [{"page", "text", "layout_html", "layout_error"}, ...]
@@ -4323,8 +4324,15 @@ def extract(data: bytes, ext: str) -> tuple:
     discard every other already-succeeded page. ExtractorError is raised
     only if EVERY page failed. layout/fields failures degrade to
     per-panel error strings only, as before.
+
+    `filename` is optional and used only for the [TIMING] START/DONE log
+    lines (real wall-clock timestamps, for monitoring — time.monotonic()
+    below still drives the accurate elapsed-seconds figure, since it's
+    immune to system clock changes but has no meaningful absolute value).
     """
     _doc_t0 = time.monotonic()
+    _doc_start_wall = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[TIMING] Document START ({filename or 'unnamed'}) = {_doc_start_wall}")
     if ext == ".pdf":
         rendered = [(n, b64, "image/jpeg") for n, b64 in _render_pdf_pages(data)]
     else:
@@ -4424,7 +4432,9 @@ def extract(data: bytes, ext: str) -> tuple:
         "page_images": page_images,
     }
     meta = {"engine": ENGINE_NAME, "source": "ollama-vision", "deployment": _MODEL}
-    print(f"[TIMING] Document TOTAL ({len(rendered)} page(s)) = "
-          f"{time.monotonic() - _doc_t0:.1f}s")
+    _doc_end_wall = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[TIMING] Document DONE ({filename or 'unnamed'}, {len(rendered)} page(s)): "
+          f"start={_doc_start_wall} end={_doc_end_wall} "
+          f"total={time.monotonic() - _doc_t0:.1f}s")
     return pages, extras, meta
 
